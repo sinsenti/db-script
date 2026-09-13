@@ -41,14 +41,16 @@ Goal: turn `db.py` into a safe, tested, installable terminal database browser. K
 - [ ] Make bulk editing transactional and add a dry-run preview.
 - [ ] Disable bulk editing above a configurable row limit.
 - [ ] Never treat a missing bulk-edit row as a delete without explicit confirmation.
-- [ ] Add `--read-only` and make remote connections read-only by default.
+- [x] Add a `--read-only` session mode that hides mutation actions.
+- [ ] Make remote connections read-only by default.
 - [ ] Stop putting database passwords in process command-line arguments.
 - [ ] Add subprocess timeouts, cancellation and structured error messages.
 - [ ] Add backups before destructive operations.
 
 ## Phase 4 — User experience
 
-- [ ] Add command-line parsing: `--help`, `--version`, `--read-only`, `--limit`, `--query`, `--format` and `--no-color`.
+- [x] Add command-line parsing foundation with positional targets, `--help`, `--version` and `--read-only`.
+- [ ] Add `--limit`, `--query`, `--format` and `--no-color`.
 - [ ] Add a full-screen multiline SQL editor.
 - [ ] Add searchable query history per connection.
 - [ ] Add saved queries/bookmarks.

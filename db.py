@@ -1,3 +1,4 @@
+import argparse
 import csv
 import difflib
 import io
@@ -32,6 +33,7 @@ except ImportError:
 DB_KEYWORDS = ["postgres", "mysql", "mariadb", "sqlite"]
 DB_PORTS = ["5432", "3306"]
 MAX_COL_WIDTH = 35
+APP_VERSION = "0.1.0"
 
 _FK_CACHE = {}
 CANCELLED = object()
@@ -2499,12 +2501,17 @@ def browse_table(
     all_tables=None,
     table_name="table",
     total_rows=None,
+    read_only=False,
     **kwargs,
 ):
     """Interactive table browser supporting visual multi-select, FK nav, raw SQL shell with JOIN completions, exports & jump shortcuts."""
     # Optional adapter bridge used during the incremental Python refactor.
     # Legacy callback arguments remain supported for the other backends.
     backend_adapter = kwargs.get("adapter")
+    if read_only:
+        # A read-only session must not expose mutation actions, even for a
+        # legacy backend whose callback implementation predates adapters.
+        update_fn = insert_fn = delete_fn = None
     offset = 0
     col_offset = 0
     cursor_idx = 0
@@ -2589,6 +2596,8 @@ def browse_table(
             status += f" [Sort: {sort_col} {sort_dir}]"
         if filter_text:
             status += f" (Filter: '{filter_text}')"
+        if read_only:
+            status += " [READ ONLY]"
 
         frame_lines.append(
             f" {BOLD}{CYAN}Data Browser: {table_name}{RESET} [{status}] [{col_status}]  "
@@ -2828,6 +2837,7 @@ def browse_table(
                                 dbname_or_path=dbname_or_path,
                                 all_tables=all_tables,
                                 table_name=target_tbl,
+                                read_only=read_only,
                                 adapter=backend_adapter,
                             )
 
@@ -2874,6 +2884,7 @@ def browse_table(
                         dbname_or_path=dbname_or_path,
                         all_tables=all_tables,
                         table_name="Custom Query",
+                        read_only=read_only,
                     )
 
         # Visual Multi-select Toggle
@@ -3280,10 +3291,35 @@ def browse_table(
 # -------------------------------------------------------------------
 
 
+def parse_cli_args(argv=None):
+    """Parse command-line options while preserving the original positional target."""
+    parser = argparse.ArgumentParser(
+        prog="db.py",
+        description="Keyboard-driven SQLite, PostgreSQL and MySQL database browser.",
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help="SQLite path or PostgreSQL/MySQL connection URL",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Disable insert, update and delete actions for this session",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"db.py {APP_VERSION}",
+    )
+    return parser.parse_args(argv)
+
+
 def main():
+    args = parse_cli_args()
     cli_item = None
-    if len(sys.argv) > 1:
-        raw_arg = sys.argv[1]
+    if args.target:
+        raw_arg = args.target
         if raw_arg.startswith(("postgres://", "postgresql://")):
             cli_item = {
                 "type": "direct_postgres",
@@ -3433,6 +3469,7 @@ def main():
                     dbname_or_path=target,
                     all_tables=tables,
                     table_name=t_name,
+                    read_only=args.read_only,
                 )
 
         # -------------------------------------------------------------
@@ -3505,6 +3542,7 @@ def main():
                     dbname_or_path=target,
                     all_tables=tables,
                     table_name=t_name,
+                    read_only=args.read_only,
                 )
 
         # -------------------------------------------------------------
@@ -3596,6 +3634,7 @@ def main():
                     dbname_or_path=target,
                     all_tables=tables,
                     table_name=t_name,
+                    read_only=args.read_only,
                     adapter=adapter,
                 )
 
@@ -3741,6 +3780,7 @@ def main():
                         dbname_or_path=dbname,
                         all_tables=tables,
                         table_name=t_name,
+                        read_only=args.read_only,
                     )
 
 
