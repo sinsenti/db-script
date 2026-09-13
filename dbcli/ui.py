@@ -58,9 +58,6 @@ def exit_cleanup():
         sys.stdout.write("\033[?25h\033[?1049l")
         sys.stdout.flush()
         _ALT_SCREEN_ACTIVE = False
-    else:
-        sys.stdout.write("\033[?25h")
-        sys.stdout.flush()
 
 
 atexit.register(exit_cleanup)

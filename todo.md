@@ -13,7 +13,7 @@ Goal: turn `db.py` into a safe, tested, installable terminal database browser. K
 - [x] Extract low-level terminal rendering, input, styling and clipboard helpers into `dbcli/ui.py`.
 - [ ] Move higher-level menus and browser screens from `db.py` into `dbcli/ui.py`.
 - [x] Move export functions and database discovery into separate modules.
-- [ ] Move editor integration into `dbcli/editor.py`.
+- [x] Move editor integration into `dbcli/editor.py`.
 - [ ] Remove duplicated legacy database functions after each backend is migrated.
 
 ## Phase 2 — Database adapters and tests

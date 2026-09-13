@@ -2,15 +2,12 @@ import csv
 import difflib
 import io
 import json
-import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import termios
-import tty
 import traceback
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -459,235 +456,14 @@ def is_sql_where_expression(text):
     return any(tok in text.upper() for tok in tokens)
 
 
-# -------------------------------------------------------------------
-#  NVIM / $EDITOR INTEGRATIONS
-# -------------------------------------------------------------------
-
-
-def edit_text_in_nvim(initial_text, suffix=".sql"):
-    """Opens $EDITOR (nvim) to edit raw text (e.g. SQL filter queries)."""
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=suffix, delete=False) as tf:
-        tf.write(initial_text or "")
-        temp_path = tf.name
-
-    editor = os.environ.get("EDITOR")
-    if not editor:
-        editor = (
-            "nvim"
-            if shutil.which("nvim")
-            else ("vim" if shutil.which("vim") else "nano")
-        )
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-
-    try:
-        sys.stdout.write("\033[?25h\033[?1049l")
-        sys.stdout.flush()
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        subprocess.call([editor, temp_path])
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        termios.tcflush(fd, termios.TCIFLUSH)
-        enter_alt_screen()
-
-    try:
-        with open(temp_path, "r", encoding="utf-8") as f:
-            updated_text = f.read().strip()
-        os.remove(temp_path)
-        return updated_text
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        print(f"\n{RED}Error reading text from editor: {e}{RESET}")
-        return initial_text
-
-
-def launch_nvim_editor(data_dict):
-    """Opens Neovim with single row data formatted as JSON."""
-    edit_dict = {}
-    json_fields = set()
-
-    for key, val in data_dict.items():
-        if isinstance(val, str) and (
-            (val.startswith("{") and val.endswith("}"))
-            or (val.startswith("[") and val.endswith("]"))
-        ):
-            try:
-                edit_dict[key] = json.loads(val)
-                json_fields.add(key)
-                continue
-            except json.JSONDecodeError:
-                pass
-        edit_dict[key] = val
-
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as tf:
-        json.dump(edit_dict, tf, indent=2, ensure_ascii=False)
-        temp_path = tf.name
-
-    editor = os.environ.get("EDITOR")
-    if not editor:
-        editor = (
-            "nvim"
-            if shutil.which("nvim")
-            else ("vim" if shutil.which("vim") else "nano")
-        )
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-
-    try:
-        sys.stdout.write("\033[?25h\033[?1049l")
-        sys.stdout.flush()
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        subprocess.call([editor, temp_path])
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        termios.tcflush(fd, termios.TCIFLUSH)
-        enter_alt_screen()
-
-    try:
-        with open(temp_path, "r", encoding="utf-8") as f:
-            updated_dict = json.load(f)
-        os.remove(temp_path)
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        print(f"\n{RED}Error reading edited JSON or syntax error: {e}{RESET}")
-        return None
-
-    final_dict = {}
-    for k, v in updated_dict.items():
-        if k in json_fields and isinstance(v, (dict, list)):
-            final_dict[k] = json.dumps(v)
-        else:
-            final_dict[k] = v
-
-    return final_dict
-
-
-def launch_nvim_insert_editor(headers):
-    """Opens Neovim with a blank JSON object template pre-populated with column headers for row insertion."""
-    if not headers:
-        return None
-    template = {h: None for h in headers}
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as tf:
-        json.dump(template, tf, indent=2, ensure_ascii=False)
-        temp_path = tf.name
-
-    editor = os.environ.get("EDITOR")
-    if not editor:
-        editor = (
-            "nvim"
-            if shutil.which("nvim")
-            else ("vim" if shutil.which("vim") else "nano")
-        )
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-
-    try:
-        sys.stdout.write("\033[?25h\033[?1049l")
-        sys.stdout.flush()
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        subprocess.call([editor, temp_path])
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        termios.tcflush(fd, termios.TCIFLUSH)
-        enter_alt_screen()
-
-    try:
-        with open(temp_path, "r", encoding="utf-8") as f:
-            inserted_data = json.load(f)
-        os.remove(temp_path)
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        print(f"\n{RED}Error reading inserted JSON or syntax error: {e}{RESET}")
-        return None
-
-    if isinstance(inserted_data, dict):
-        return [inserted_data]
-    elif isinstance(inserted_data, list):
-        return [d for d in inserted_data if isinstance(d, dict)]
-    return None
-
-
-def launch_nvim_table_editor(headers, rows):
-    """Opens Neovim with entire table data formatted as a JSON array of objects."""
-    if not headers or not rows:
-        return None
-
-    json_fields = set()
-    table_data = []
-
-    for row in rows:
-        row_dict = {}
-        for k, val in zip(headers, row):
-            if isinstance(val, str) and (
-                (val.startswith("{") and val.endswith("}"))
-                or (val.startswith("[") and val.endswith("]"))
-            ):
-                try:
-                    row_dict[k] = json.loads(val)
-                    json_fields.add(k)
-                    continue
-                except json.JSONDecodeError:
-                    pass
-            row_dict[k] = val
-        table_data.append(row_dict)
-
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as tf:
-        json.dump(table_data, tf, indent=2, ensure_ascii=False)
-        temp_path = tf.name
-
-    editor = os.environ.get("EDITOR")
-    if not editor:
-        editor = (
-            "nvim"
-            if shutil.which("nvim")
-            else ("vim" if shutil.which("vim") else "nano")
-        )
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-
-    try:
-        sys.stdout.write("\033[?25h\033[?1049l")
-        sys.stdout.flush()
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        subprocess.call([editor, temp_path])
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        termios.tcflush(fd, termios.TCIFLUSH)
-        enter_alt_screen()
-
-    try:
-        with open(temp_path, "r", encoding="utf-8") as f:
-            updated_table_data = json.load(f)
-        os.remove(temp_path)
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        print(f"\n{RED}Error reading edited JSON or syntax error: {e}{RESET}")
-        return None
-
-    if not isinstance(updated_table_data, list):
-        print(f"\n{RED}Error: Expected top-level JSON array of row objects.{RESET}")
-        return None
-
-    final_table_data = []
-    for row_dict in updated_table_data:
-        if isinstance(row_dict, dict):
-            final_row = {}
-            for k, v in row_dict.items():
-                if k in json_fields and isinstance(v, (dict, list)):
-                    final_row[k] = json.dumps(v)
-                else:
-                    final_row[k] = v
-            final_table_data.append(final_row)
-
-    return final_table_data
+# Editor implementations live in dbcli.editor.  These imports preserve the
+# existing function names used by the browser controller.
+from dbcli.editor import (
+    edit_text_in_nvim,
+    launch_nvim_editor,
+    launch_nvim_insert_editor,
+    launch_nvim_table_editor,
+)
 
 
 # -------------------------------------------------------------------
