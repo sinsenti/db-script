@@ -1,11 +1,9 @@
-import atexit
 import csv
 import difflib
 import io
 import json
 import os
 import re
-import select
 import shutil
 import sqlite3
 import subprocess
@@ -18,6 +16,8 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 
 from dbcli.adapters import SQLiteAdapter
+from dbcli.discovery import find_docker_databases, find_sqlite_files
+from dbcli.export import export_rows_to_csv, export_rows_to_json, export_rows_to_sql
 
 # Optional prompt_toolkit import for interactive SQL autocompletion
 try:
@@ -36,184 +36,33 @@ DB_KEYWORDS = ["postgres", "mysql", "mariadb", "sqlite"]
 DB_PORTS = ["5432", "3306"]
 MAX_COL_WIDTH = 35
 
-# ANSI Colors & Styling
-CYAN = "\033[96m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-BLUE = "\033[94m"
-MAGENTA = "\033[95m"
-RED = "\033[91m"
-DIM = "\033[2m"
-BOLD = "\033[1m"
-REVERSE = "\033[7m"
-RESET = "\033[0m"
-
-_ALT_SCREEN_ACTIVE = False
 _FK_CACHE = {}
 CANCELLED = object()
 
-
-# -------------------------------------------------------------------
-#  TERMINAL DISPLAY & CURSOR MANAGEMENT
-# -------------------------------------------------------------------
-
-
-def strip_ansi(text):
-    """Strips ANSI escape codes to calculate true visible string length."""
-    return re.sub(r"\x1b\[[0-9;]*m", "", str(text))
-
-
-def visible_len(text):
-    return len(strip_ansi(text))
-
-
-def enter_alt_screen():
-    """Switches to alternate terminal buffer and hides cursor."""
-    global _ALT_SCREEN_ACTIVE
-    if not _ALT_SCREEN_ACTIVE:
-        sys.stdout.write("\033[?1049h\033[?25l")
-        sys.stdout.flush()
-        _ALT_SCREEN_ACTIVE = True
-
-
-def exit_cleanup():
-    """Restores main terminal buffer cleanly on exit without wiping stdout."""
-    global _ALT_SCREEN_ACTIVE
-    if _ALT_SCREEN_ACTIVE:
-        sys.stdout.write("\033[?25h\033[?1049l")
-        sys.stdout.flush()
-        _ALT_SCREEN_ACTIVE = False
-    else:
-        sys.stdout.write("\033[?25h")
-        sys.stdout.flush()
-
-
-# Automatically handle screen buffer & cursor restoration on exit
-atexit.register(exit_cleanup)
-
-
-def draw_frame(lines):
-    """
-    Zero-flicker in-place frame renderer.
-    Flattens embedded newlines and clamps output to current terminal height
-    to guarantee zero buffer jitter and smooth scrolling.
-    """
-    _, term_height = get_terminal_size()
-    flat_lines = []
-    for item in lines:
-        flat_lines.extend(str(item).split("\n"))
-
-    flat_lines = flat_lines[:term_height]
-
-    formatted = [line + "\033[K" for line in flat_lines]
-    output = "\033[?25l\033[H" + "\n".join(formatted) + "\033[J"
-    sys.stdout.write(output)
-    sys.stdout.flush()
-
-
-def get_key():
-    """Captures a single keypress cleanly using TCSANOW to prevent buffer drain latency stutters."""
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-
-        if ch == "\x1b":
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if r:
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    r2, _, _ = select.select([sys.stdin], [], [], 0.05)
-                    if r2:
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == "A":
-                            return "k"  # Up Arrow
-                        if ch3 == "B":
-                            return "j"  # Down Arrow
-                        if ch3 == "C":
-                            return "L"  # Right Arrow -> Shift Columns Right
-                        if ch3 == "D":
-                            return "H"  # Left Arrow -> Shift Columns Left
-            return "q"  # ESC key
-
-        if ch in ("\r", "\n"):
-            return "ENTER"
-        if ch == " ":
-            return "SPACE"
-        if ch == "\x04":  # Ctrl+D
-            return "CTRL_D"
-        if ch == "\x15":  # Ctrl+U
-            return "CTRL_U"
-        if ch == "\x07":  # Ctrl+G
-            return "CTRL_G"
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-
-
-def get_next_key_timeout(timeout=0.3):
-    """Checks for a second keypress (e.g. second 'g' in 'gg', 'd' in 'dd', or 'y' in 'yy') in raw terminal mode."""
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        if r:
-            return sys.stdin.read(1)
-        return None
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-
-
-def get_terminal_size():
-    try:
-        sz = shutil.get_terminal_size()
-        return sz.columns, sz.lines
-    except Exception:
-        return 100, 24
-
-
-def confirm_action(prompt_text):
-    """Displays a confirmation prompt and waits for user response (y/N)."""
-    sys.stdout.write("\033[?25h")
-    sys.stdout.flush()
-    try:
-        ans = input(f"\n {RED}{BOLD}{prompt_text} (y/N): {RESET}").strip().lower()
-    except Exception:
-        ans = "n"
-    sys.stdout.write("\033[?25l")
-    sys.stdout.flush()
-    return ans in ("y", "yes")
-
-
-def copy_to_clipboard(text):
-    """Copies provided text to system clipboard trying wl-copy (default), xclip, or pbcopy."""
-    text_str = str(text) if text is not None else ""
-    if shutil.which("wl-copy"):
-        try:
-            proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE, text=True)
-            proc.communicate(input=text_str, timeout=2)
-            return True
-        except Exception:
-            pass
-    if shutil.which("xclip"):
-        try:
-            proc = subprocess.Popen(
-                ["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE, text=True
-            )
-            proc.communicate(input=text_str, timeout=2)
-            return True
-        except Exception:
-            pass
-    if shutil.which("pbcopy"):
-        try:
-            proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE, text=True)
-            proc.communicate(input=text_str, timeout=2)
-            return True
-        except Exception:
-            pass
-    return False
+# Terminal rendering, input and styling live in dbcli.ui.  These imports keep
+# the existing db.py screens compatible while they are migrated incrementally.
+from dbcli.ui import (
+    BLUE,
+    BOLD,
+    CYAN,
+    DIM,
+    GREEN,
+    MAGENTA,
+    RED,
+    RESET,
+    REVERSE,
+    YELLOW,
+    confirm_action,
+    copy_to_clipboard,
+    draw_frame,
+    enter_alt_screen,
+    exit_cleanup,
+    get_key,
+    get_next_key_timeout,
+    get_terminal_size,
+    strip_ansi,
+    visible_len,
+)
 
 
 # -------------------------------------------------------------------
@@ -1986,54 +1835,6 @@ def get_mysql_schema_info(container, dbname, table_name):
     return headers, rows
 
 
-def export_rows_to_json(headers, rows, filename_prefix="export"):
-    """Exports provided headers and rows into a formatted JSON file."""
-    export_data = []
-    for r in rows:
-        row_dict = {}
-        for h, val in zip(headers, r):
-            if isinstance(val, str) and (
-                (val.startswith("{") and val.endswith("}"))
-                or (val.startswith("[") and val.endswith("]"))
-            ):
-                try:
-                    row_dict[h] = json.loads(val)
-                    continue
-                except json.JSONDecodeError:
-                    pass
-            row_dict[h] = val
-        export_data.append(row_dict)
-
-    export_path = Path.cwd() / f"{filename_prefix}.json"
-    with open(export_path, "w", encoding="utf-8") as f:
-        json.dump(export_data, f, indent=2, ensure_ascii=False)
-
-    return export_path
-
-
-def export_rows_to_csv(headers, rows, filename_prefix="export"):
-    """Exports provided headers and rows into a CSV file."""
-    export_path = Path.cwd() / f"{filename_prefix}.csv"
-    with open(export_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(headers)
-        writer.writerows(rows)
-    return export_path
-
-
-def export_rows_to_sql(headers, rows, table_name, filename_prefix="export"):
-    """Exports provided headers and rows as raw SQL INSERT statements."""
-    export_path = Path.cwd() / f"{filename_prefix}.sql"
-    cols_quoted = ", ".join([f'"{h}"' for h in headers])
-
-    with open(export_path, "w", encoding="utf-8") as f:
-        for r in rows:
-            vals_formatted = [format_sql_value(v) for v in r]
-            sql = f'INSERT INTO "{table_name}" ({cols_quoted}) VALUES ({", ".join(vals_formatted)});\n'
-            f.write(sql)
-    return export_path
-
-
 # -------------------------------------------------------------------
 #  TERMINAL FORMATTING UTILITIES & COLUMN CALCULATOR
 # -------------------------------------------------------------------
@@ -3701,50 +3502,6 @@ def browse_table(
 # -------------------------------------------------------------------
 #  DISCOVERY & MAIN MENU
 # -------------------------------------------------------------------
-
-
-def find_sqlite_files():
-    sqlite_dbs = []
-    for path in Path.cwd().glob("*"):
-        if path.is_file():
-            try:
-                with open(path, "rb") as f:
-                    if f.read(16) == b"SQLite format 3\x00":
-                        sqlite_dbs.append(path)
-            except (PermissionError, OSError):
-                continue
-    return sorted(sqlite_dbs, key=lambda x: x.name.lower())
-
-
-def find_docker_databases():
-    containers = []
-    try:
-        cmd = ["docker", "ps", "--format", "{{json .}}"]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        for line in res.stdout.strip().split("\n"):
-            if not line:
-                continue
-            data = json.loads(line)
-            img = data.get("Image", "").lower()
-            ports = data.get("Ports", "").lower()
-
-            if any(k in img for k in DB_KEYWORDS) or any(p in ports for p in DB_PORTS):
-                engine = (
-                    "postgres"
-                    if "postgres" in img
-                    else ("mysql" if "mysql" in img or "mariadb" in img else "other")
-                )
-                containers.append(
-                    {
-                        "id": data.get("ID"),
-                        "name": data.get("Names"),
-                        "image": data.get("Image"),
-                        "engine": engine,
-                    }
-                )
-    except Exception:
-        return None
-    return containers
 
 
 def main():
