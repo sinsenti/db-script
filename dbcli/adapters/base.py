@@ -20,6 +20,10 @@ class InvalidIdentifierError(AdapterError, ValueError):
     """Raised when a table or column identifier cannot be safely composed."""
 
 
+class DriverUnavailable(AdapterError):
+    """Raised when an optional native database driver is not installed."""
+
+
 class ReadOnlyError(AdapterError):
     """Raised when a write is attempted through a read-only adapter."""
 

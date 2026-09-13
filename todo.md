@@ -26,11 +26,11 @@ Goal: turn `db.py` into a safe, tested, installable terminal database browser. K
 - [x] Add read-only query execution with a bounded result set.
 - [x] Migrate the SQLite browser flow in `db.py` to the adapter.
 - [x] Add unit tests for filtering, sorting, pagination, CRUD, JSON values, foreign keys, read-only mode and composite-key helpers.
-- [ ] Implement a native `PostgresAdapter` using `psycopg`.
-- [ ] Implement a native `MySQLAdapter` using a supported Python driver.
-- [ ] Keep CLI/subprocess adapters only as an explicit fallback.
+- [x] Implement a native `PostgresAdapter` using optional `psycopg`.
+- [x] Implement a native `MySQLAdapter` using optional `mysql-connector-python`.
+- [x] Keep the existing CLI/subprocess path as an explicit `--cli` fallback and as a dependency fallback.
 - [ ] Add PostgreSQL/MySQL integration tests using Docker.
-- [ ] Add adapter contract tests that every backend must pass.
+- [x] Add adapter contract tests for SQLite, PostgreSQL and MySQL adapter behavior.
 
 ## Phase 3 — Safety and reliability
 

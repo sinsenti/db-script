@@ -3,7 +3,10 @@
 from .adapters import (
     AdapterError,
     DatabaseAdapter,
+    DriverUnavailable,
     InvalidIdentifierError,
+    MySQLAdapter,
+    PostgresAdapter,
     QueryResult,
     ReadOnlyError,
     RowIdentityError,
@@ -14,7 +17,10 @@ from .adapters import (
 __all__ = [
     "AdapterError",
     "DatabaseAdapter",
+    "DriverUnavailable",
     "InvalidIdentifierError",
+    "MySQLAdapter",
+    "PostgresAdapter",
     "QueryResult",
     "ReadOnlyError",
     "RowIdentityError",

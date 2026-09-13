@@ -13,7 +13,12 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
-from dbcli.adapters import SQLiteAdapter
+from dbcli.adapters import (
+    DriverUnavailable,
+    MySQLAdapter,
+    PostgresAdapter,
+    SQLiteAdapter,
+)
 from dbcli.discovery import find_docker_databases, find_sqlite_files
 from dbcli.export import export_rows_to_csv, export_rows_to_json, export_rows_to_sql
 
@@ -2765,7 +2770,7 @@ def browse_table(
                                 if filter_query:
                                     sub_filter += f" AND ({filter_query})"
 
-                                if engine == "sqlite" and backend_adapter:
+                                if backend_adapter:
                                     return backend_adapter.fetch_page(
                                         target_tbl,
                                         limit,
@@ -3291,6 +3296,26 @@ def browse_table(
 # -------------------------------------------------------------------
 
 
+def create_native_adapter(db_type, target, read_only=False, use_cli=False):
+    """Create a native adapter when its optional driver is installed.
+
+    Docker connections continue using the existing docker-exec implementation;
+    native adapters are used for direct URLs.  Returning ``None`` is an
+    intentional CLI fallback when an optional driver is unavailable.
+    """
+    if use_cli:
+        return None
+
+    try:
+        if db_type == "direct_postgres":
+            return PostgresAdapter(target, read_only=read_only)
+        if db_type == "direct_mysql":
+            return MySQLAdapter(target, read_only=read_only)
+    except DriverUnavailable:
+        return None
+    return None
+
+
 def parse_cli_args(argv=None):
     """Parse command-line options while preserving the original positional target."""
     parser = argparse.ArgumentParser(
@@ -3306,6 +3331,11 @@ def parse_cli_args(argv=None):
         "--read-only",
         action="store_true",
         help="Disable insert, update and delete actions for this session",
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Use psql/mysql command-line fallback instead of native drivers",
     )
     parser.add_argument(
         "--version",
@@ -3403,9 +3433,16 @@ def main():
         #  DIRECT POSTGRES FLOW
         # -------------------------------------------------------------
         if db_type == "direct_postgres":
+            native_adapter = create_native_adapter(
+                db_type, target, read_only=args.read_only, use_cli=args.cli
+            )
             table_idx = 0
             while True:
-                tables = get_direct_postgres_tables(target)
+                tables = (
+                    native_adapter.list_tables()
+                    if native_adapter
+                    else get_direct_postgres_tables(target)
+                )
                 if not tables:
                     sys.stdout.write("\033[?25h")
                     sys.stdout.flush()
@@ -3429,31 +3466,73 @@ def main():
                 t_name = selected_table["name"]
 
                 def q_fn(limit, offset, filter_query=None, order_by=None):
+                    if native_adapter:
+                        try:
+                            return native_adapter.fetch_page(
+                                t_name, limit, offset, filter_query, order_by
+                            ).as_tuple()
+                        except Exception as e:
+                            return ["SQL Error"], [[str(e)]]
                     return query_direct_postgres_page(
                         target, t_name, limit, offset, filter_query, order_by=order_by
                     )
 
                 def u_fn(headers, orig_row, updated_dict):
+                    if native_adapter:
+                        try:
+                            original = dict(zip(headers, orig_row))
+                            return native_adapter.update_row(
+                                t_name, original, updated_dict
+                            ) == 1
+                        except Exception as e:
+                            print(f"\\n{RED}Database Update Error: {e}{RESET}")
+                            return False
                     return update_direct_postgres_row(
                         target, t_name, headers, orig_row, updated_dict
                     )
 
                 def i_fn(row_dict):
+                    if native_adapter:
+                        try:
+                            return native_adapter.insert_row(t_name, row_dict) == 1
+                        except Exception as e:
+                            print(f"\\n{RED}Database Insert Error: {e}{RESET}")
+                            return False
                     return insert_direct_postgres_row(target, t_name, row_dict)
 
                 def d_fn(headers, orig_row):
+                    if native_adapter:
+                        try:
+                            original = dict(zip(headers, orig_row))
+                            return native_adapter.delete_row(t_name, original) == 1
+                        except Exception as e:
+                            print(f"\\n{RED}Database Delete Error: {e}{RESET}")
+                            return False
                     return delete_direct_postgres_row(target, t_name, headers, orig_row)
 
                 def s_fn():
+                    if native_adapter:
+                        return native_adapter.schema_info(t_name).as_tuple()
                     return get_direct_postgres_schema_info(target, t_name)
 
                 def fk_fn():
+                    if native_adapter:
+                        return native_adapter.foreign_keys(t_name)
                     return get_direct_postgres_foreign_keys(target, t_name)
 
                 def count_fn_direct_pg(filter_query=None):
+                    if native_adapter:
+                        return native_adapter.count_rows(t_name, filter_query)
                     return count_direct_postgres_rows(target, t_name, filter_query)
 
                 def exec_raw_fn(raw_sql, limit, offset):
+                    if native_adapter:
+                        try:
+                            return native_adapter.execute_readonly(
+                                raw_sql, limit=limit, offset=offset
+                            ).as_tuple()
+                        except Exception as e:
+                            return ["SQL Error"], [[str(e)]]
                     return execute_direct_postgres_raw(target, raw_sql, limit, offset)
 
                 browse_table(
@@ -3470,15 +3549,26 @@ def main():
                     all_tables=tables,
                     table_name=t_name,
                     read_only=args.read_only,
+                    adapter=native_adapter,
                 )
+
+            if native_adapter:
+                native_adapter.close()
 
         # -------------------------------------------------------------
         #  DIRECT MYSQL FLOW
         # -------------------------------------------------------------
         elif db_type == "direct_mysql":
+            native_adapter = create_native_adapter(
+                db_type, target, read_only=args.read_only, use_cli=args.cli
+            )
             table_idx = 0
             while True:
-                tables = get_direct_mysql_tables(target)
+                tables = (
+                    native_adapter.list_tables()
+                    if native_adapter
+                    else get_direct_mysql_tables(target)
+                )
                 if not tables:
                     sys.stdout.write("\033[?25h")
                     sys.stdout.flush()
@@ -3502,31 +3592,73 @@ def main():
                 t_name = selected_table["name"]
 
                 def q_fn(limit, offset, filter_query=None, order_by=None):
+                    if native_adapter:
+                        try:
+                            return native_adapter.fetch_page(
+                                t_name, limit, offset, filter_query, order_by
+                            ).as_tuple()
+                        except Exception as e:
+                            return ["SQL Error"], [[str(e)]]
                     return query_direct_mysql_page(
                         target, t_name, limit, offset, filter_query, order_by=order_by
                     )
 
                 def u_fn(headers, orig_row, updated_dict):
+                    if native_adapter:
+                        try:
+                            original = dict(zip(headers, orig_row))
+                            return native_adapter.update_row(
+                                t_name, original, updated_dict
+                            ) == 1
+                        except Exception as e:
+                            print(f"\\n{RED}Database Update Error: {e}{RESET}")
+                            return False
                     return update_direct_mysql_row(
                         target, t_name, headers, orig_row, updated_dict
                     )
 
                 def i_fn(row_dict):
+                    if native_adapter:
+                        try:
+                            return native_adapter.insert_row(t_name, row_dict) == 1
+                        except Exception as e:
+                            print(f"\\n{RED}Database Insert Error: {e}{RESET}")
+                            return False
                     return insert_direct_mysql_row(target, t_name, row_dict)
 
                 def d_fn(headers, orig_row):
+                    if native_adapter:
+                        try:
+                            original = dict(zip(headers, orig_row))
+                            return native_adapter.delete_row(t_name, original) == 1
+                        except Exception as e:
+                            print(f"\\n{RED}Database Delete Error: {e}{RESET}")
+                            return False
                     return delete_direct_mysql_row(target, t_name, headers, orig_row)
 
                 def s_fn():
+                    if native_adapter:
+                        return native_adapter.schema_info(t_name).as_tuple()
                     return get_direct_mysql_schema_info(target, t_name)
 
                 def fk_fn():
+                    if native_adapter:
+                        return native_adapter.foreign_keys(t_name)
                     return get_direct_mysql_foreign_keys(target, t_name)
 
                 def count_fn_direct_my(filter_query=None):
+                    if native_adapter:
+                        return native_adapter.count_rows(t_name, filter_query)
                     return count_direct_mysql_rows(target, t_name, filter_query)
 
                 def exec_raw_fn(raw_sql, limit, offset):
+                    if native_adapter:
+                        try:
+                            return native_adapter.execute_readonly(
+                                raw_sql, limit=limit, offset=offset
+                            ).as_tuple()
+                        except Exception as e:
+                            return ["SQL Error"], [[str(e)]]
                     return execute_direct_mysql_raw(target, raw_sql, limit, offset)
 
                 browse_table(
@@ -3543,13 +3675,17 @@ def main():
                     all_tables=tables,
                     table_name=t_name,
                     read_only=args.read_only,
+                    adapter=native_adapter,
                 )
+
+            if native_adapter:
+                native_adapter.close()
 
         # -------------------------------------------------------------
         #  SQLITE FLOW
         # -------------------------------------------------------------
         elif db_type == "sqlite":
-            adapter = SQLiteAdapter(target)
+            adapter = SQLiteAdapter(target, read_only=args.read_only)
             table_idx = 0
             while True:
                 tables = adapter.list_tables()
