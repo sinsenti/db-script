@@ -17,6 +17,8 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
+from dbcli.adapters import SQLiteAdapter
+
 # Optional prompt_toolkit import for interactive SQL autocompletion
 try:
     from prompt_toolkit import PromptSession
@@ -1755,12 +1757,7 @@ def get_foreign_keys(engine, container, dbname_or_path, table_name):
     fks = []
     try:
         if engine == "sqlite":
-            conn = sqlite3.connect(dbname_or_path)
-            cursor = conn.cursor()
-            cursor.execute(f'PRAGMA foreign_key_list("{table_name}");')
-            for row in cursor.fetchall():
-                fks.append({"from_col": row[3], "to_table": row[2], "to_col": row[4]})
-            conn.close()
+            fks = SQLiteAdapter(dbname_or_path).foreign_keys(table_name)
         elif engine == "postgres":
             user = get_container_env_user(container, "postgres")
             sql = (
@@ -1837,30 +1834,11 @@ def get_foreign_keys(engine, container, dbname_or_path, table_name):
 
 
 def count_sqlite_rows(db_path, table_name, filter_query=None):
-    """Counts matching rows for SQLite."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    where_clause = ""
-    params = []
-    if filter_query:
-        clean_filter = sanitize_where_clause(filter_query)
-        if is_sql_where_expression(clean_filter):
-            where_clause = f"WHERE {clean_filter}"
-        else:
-            cursor.execute(f'PRAGMA table_info("{table_name}")')
-            cols = [col[1] for col in cursor.fetchall()]
-            conditions = [f'"{col}" LIKE ?' for col in cols]
-            where_clause = "WHERE " + " OR ".join(conditions)
-            params = [f"%{clean_filter}%"] * len(cols)
-
-    sql = f'SELECT COUNT(*) FROM "{table_name}" {where_clause}'
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
     try:
-        cursor.execute(sql, params)
-        res = cursor.fetchone()[0]
+        return SQLiteAdapter(db_path).count_rows(table_name, filter_query)
     except Exception:
-        res = 0
-    conn.close()
-    return res
+        return 0
 
 
 def count_postgres_rows(container, dbname, table_name, filter_query=None):
@@ -1932,27 +1910,9 @@ def count_mysql_rows(container, dbname, table_name, filter_query=None):
 
 
 def get_sqlite_schema_info(db_path, table_name):
-    """Fetches schema info for SQLite table."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(f'PRAGMA table_info("{table_name}")')
-    cols = cursor.fetchall()
-    conn.close()
-
-    headers = ["CID", "Column Name", "Type", "NotNull", "Default", "PK"]
-    rows = []
-    for c in cols:
-        rows.append(
-            [
-                str(c[0]),
-                c[1],
-                c[2] or "TEXT",
-                "YES" if c[3] else "NO",
-                str(c[4]) if c[4] is not None else "NULL",
-                "YES" if c[5] else "NO",
-            ]
-        )
-    return headers, rows
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
+    result = SQLiteAdapter(db_path).schema_info(table_name)
+    return result.as_tuple()
 
 
 def get_postgres_schema_info(container, dbname, table_name):
@@ -2389,24 +2349,9 @@ def build_where_clause(headers, orig_row):
 
 
 def insert_sqlite_row(db_path, table_name, row_dict):
-    cols = list(row_dict.keys())
-    vals = list(row_dict.values())
-    formatted_vals = []
-    for v in vals:
-        if isinstance(v, (dict, list)):
-            formatted_vals.append(json.dumps(v))
-        else:
-            formatted_vals.append(v)
-    cols_sql = ", ".join([f'"{c}"' for c in cols])
-    placeholders = ", ".join(["?"] * len(cols))
-    sql = f'INSERT INTO "{table_name}" ({cols_sql}) VALUES ({placeholders})'
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(sql, formatted_vals)
-        conn.commit()
-        conn.close()
-        return True
+        return SQLiteAdapter(db_path).insert_row(table_name, row_dict) == 1
     except Exception as e:
         print(f"\n{RED}Database Insert Error: {e}{RESET}")
         return False
@@ -2479,41 +2424,20 @@ def insert_mysql_row(container, dbname, table_name, row_dict):
 
 
 def update_sqlite_row(db_path, table_name, headers, orig_row, updated_dict):
-    changed = {
-        k: v
-        for k, v in updated_dict.items()
-        if dict(zip(headers, orig_row)).get(k) != v
-    }
-    if not changed:
-        print(f"\n{YELLOW}No changes detected.{RESET}")
-        return False
-
-    set_clause = ", ".join([f'"{k}" = ?' for k in changed.keys()])
-    where_sql = build_where_clause(headers, orig_row)
-
-    sql = f'UPDATE "{table_name}" SET {set_clause} WHERE {where_sql}'
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(sql, list(changed.values()))
-        conn.commit()
-        conn.close()
-        return True
+        original = dict(zip(headers, orig_row))
+        return SQLiteAdapter(db_path).update_row(table_name, original, updated_dict) == 1
     except Exception as e:
         print(f"\n{RED}Database Update Error: {e}{RESET}")
         return False
 
 
 def delete_sqlite_row(db_path, table_name, headers, orig_row):
-    where_sql = build_where_clause(headers, orig_row)
-    sql = f'DELETE FROM "{table_name}" WHERE {where_sql}'
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        conn.commit()
-        conn.close()
-        return True
+        original = dict(zip(headers, orig_row))
+        return SQLiteAdapter(db_path).delete_row(table_name, original) == 1
     except Exception as e:
         print(f"\n{RED}Database Delete Error: {e}{RESET}")
         return False
@@ -2657,24 +2581,13 @@ def delete_mysql_row(container, dbname, table_name, headers, orig_row):
 
 
 def get_sqlite_tables(db_path):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
-    )
-    tables = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return sorted(tables)
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
+    return SQLiteAdapter(db_path).list_tables()
 
 
 def get_sqlite_row_count(db_path, table_name):
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
+        return SQLiteAdapter(db_path).count_rows(table_name)
     except Exception:
         return 0
 
@@ -2682,58 +2595,21 @@ def get_sqlite_row_count(db_path, table_name):
 def query_sqlite_page(
     db_path, table_name, limit, offset, filter_query=None, order_by=None
 ):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    where_clause = ""
-    params = []
-    if filter_query:
-        clean_filter = sanitize_where_clause(filter_query)
-        if is_sql_where_expression(clean_filter):
-            where_clause = f"WHERE {clean_filter}"
-        else:
-            cursor.execute(f'PRAGMA table_info("{table_name}")')
-            cols = [col[1] for col in cursor.fetchall()]
-            conditions = [f'"{col}" LIKE ?' for col in cols]
-            where_clause = "WHERE " + " OR ".join(conditions)
-            params = [f"%{clean_filter}%"] * len(cols)
-
-    order_sql = f'ORDER BY "{order_by[0]}" {order_by[1]}' if order_by else ""
-
-    sql = f'SELECT * FROM "{table_name}" {where_clause} {order_sql} LIMIT {limit} OFFSET {offset}'
+    """Compatibility wrapper around :class:`SQLiteAdapter`."""
     try:
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        headers = (
-            [description[0] for description in cursor.description]
-            if cursor.description
-            else []
-        )
+        return SQLiteAdapter(db_path).fetch_page(
+            table_name, limit, offset, filter_query, order_by
+        ).as_tuple()
     except Exception as e:
-        conn.close()
         return ["SQL Error"], [[str(e)]]
-
-    conn.close()
-    return headers, rows
 
 
 def execute_sqlite_raw(db_path, sql_query, limit=50, offset=0):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    limited_sql = f"{sql_query.rstrip(';')} LIMIT {limit} OFFSET {offset};"
+    """Compatibility wrapper around the bounded read-only query API."""
     try:
-        cursor.execute(limited_sql)
-        rows = cursor.fetchall()
-        headers = (
-            [description[0] for description in cursor.description]
-            if cursor.description
-            else []
-        )
+        return SQLiteAdapter(db_path).execute_readonly(sql_query, limit=limit, offset=offset).as_tuple()
     except Exception as e:
-        conn.close()
         return ["SQL Error"], [[str(e)]]
-    conn.close()
-    return headers, rows
 
 
 # -------------------------------------------------------------------
@@ -3049,6 +2925,9 @@ def browse_table(
     **kwargs,
 ):
     """Interactive table browser supporting visual multi-select, FK nav, raw SQL shell with JOIN completions, exports & jump shortcuts."""
+    # Optional adapter bridge used during the incremental Python refactor.
+    # Legacy callback arguments remain supported for the other backends.
+    backend_adapter = kwargs.get("adapter")
     offset = 0
     col_offset = 0
     cursor_idx = 0
@@ -3300,7 +3179,15 @@ def browse_table(
                                 if filter_query:
                                     sub_filter += f" AND ({filter_query})"
 
-                                if engine == "sqlite":
+                                if engine == "sqlite" and backend_adapter:
+                                    return backend_adapter.fetch_page(
+                                        target_tbl,
+                                        limit,
+                                        offset,
+                                        sub_filter,
+                                        order_by,
+                                    ).as_tuple()
+                                elif engine == "sqlite":
                                     return query_sqlite_page(
                                         dbname_or_path,
                                         target_tbl,
@@ -3364,6 +3251,7 @@ def browse_table(
                                 dbname_or_path=dbname_or_path,
                                 all_tables=all_tables,
                                 table_name=target_tbl,
+                                adapter=backend_adapter,
                             )
 
         # Free-form SQL Shell & Jump to Row Index (:) with JOIN Autocomplete
@@ -4090,9 +3978,10 @@ def main():
         #  SQLITE FLOW
         # -------------------------------------------------------------
         elif db_type == "sqlite":
+            adapter = SQLiteAdapter(target)
             table_idx = 0
             while True:
-                tables = get_sqlite_tables(target)
+                tables = adapter.list_tables()
                 if not tables:
                     sys.stdout.write("\033[?25h")
                     sys.stdout.flush()
@@ -4104,7 +3993,7 @@ def main():
 
                 table_items = []
                 for t in tables:
-                    count = get_sqlite_row_count(target, t)
+                    count = adapter.count_rows(t)
                     table_items.append({"name": t, "label": f"{t:<30} ({count} rows)"})
 
                 selected_table, table_idx = select_menu_item(
@@ -4120,32 +4009,46 @@ def main():
                 t_name = selected_table["name"]
 
                 def q_fn(limit, offset, filter_query=None, order_by=None):
-                    return query_sqlite_page(
-                        target, t_name, limit, offset, filter_query, order_by=order_by
-                    )
+                    return adapter.fetch_page(
+                        t_name, limit, offset, filter_query, order_by
+                    ).as_tuple()
 
                 def u_fn(headers, orig_row, updated_dict):
-                    return update_sqlite_row(
-                        target, t_name, headers, orig_row, updated_dict
-                    )
+                    try:
+                        original = dict(zip(headers, orig_row))
+                        return adapter.update_row(t_name, original, updated_dict) == 1
+                    except Exception as e:
+                        print(f"\\n{RED}Database Update Error: {e}{RESET}")
+                        return False
 
                 def i_fn(row_dict):
-                    return insert_sqlite_row(target, t_name, row_dict)
+                    try:
+                        return adapter.insert_row(t_name, row_dict) == 1
+                    except Exception as e:
+                        print(f"\\n{RED}Database Insert Error: {e}{RESET}")
+                        return False
 
                 def d_fn(headers, orig_row):
-                    return delete_sqlite_row(target, t_name, headers, orig_row)
+                    try:
+                        original = dict(zip(headers, orig_row))
+                        return adapter.delete_row(t_name, original) == 1
+                    except Exception as e:
+                        print(f"\\n{RED}Database Delete Error: {e}{RESET}")
+                        return False
 
                 def s_fn():
-                    return get_sqlite_schema_info(target, t_name)
+                    return adapter.schema_info(t_name).as_tuple()
 
                 def fk_fn():
-                    return get_foreign_keys("sqlite", None, target, t_name)
+                    return adapter.foreign_keys(t_name)
 
                 def count_fn_sqlite(filter_query=None):
-                    return count_sqlite_rows(target, t_name, filter_query)
+                    return adapter.count_rows(t_name, filter_query)
 
                 def exec_raw_fn(raw_sql, limit, offset):
-                    return execute_sqlite_raw(target, raw_sql, limit, offset)
+                    return adapter.execute_readonly(
+                        raw_sql, limit=limit, offset=offset
+                    ).as_tuple()
 
                 browse_table(
                     q_fn,
@@ -4160,7 +4063,10 @@ def main():
                     dbname_or_path=target,
                     all_tables=tables,
                     table_name=t_name,
+                    adapter=adapter,
                 )
+
+            adapter.close()
 
         # -------------------------------------------------------------
         #  DOCKER FLOW (Postgres / MySQL)
