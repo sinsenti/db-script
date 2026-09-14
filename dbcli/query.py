@@ -133,6 +133,22 @@ def build_filter_clause(
     )
 
 
+def format_sql_literal(value: Any) -> str:
+    """Format a value for a generated, internal SQL relation predicate.
+
+    New database writes must use driver parameters.  This helper is retained
+    only for composing a foreign-key browser filter before it is handed to a
+    read query; it is not a general-purpose query API.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def build_primary_key_where(
     original_row: Mapping[str, Any],
     primary_key_columns: Sequence[str],

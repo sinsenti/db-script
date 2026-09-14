@@ -1,6 +1,11 @@
 import unittest
 
-from dbcli.adapters import MySQLAdapter, PostgresAdapter
+from dbcli.adapters import (
+    MySQLAdapter,
+    PostgresAdapter,
+    ReadOnlyError,
+    UnsupportedQueryError,
+)
 
 
 class FakeCursor:
@@ -99,6 +104,10 @@ class NativeAdapterTests(unittest.TestCase):
             "SELECT id, name FROM users WHERE name = %s", ("Ada",), limit=1
         )
         self.assertEqual(raw.rows[0], (1, "Ada"))
+        quoted_identifier = adapter.execute_readonly(
+            'SELECT "update", \'delete\' FROM users', limit=1
+        )
+        self.assertEqual(quoted_identifier.rows[0], (1, "Ada"))
 
         self.assertGreaterEqual(len(connection.calls), 10)
         update_call = next(call for call in connection.calls if call[0].lstrip().upper().startswith("UPDATE"))
@@ -121,6 +130,29 @@ class NativeAdapterTests(unittest.TestCase):
             connection_factory=lambda: connection,
         )
         self._exercise_adapter(adapter, connection)
+
+    def test_native_read_only_contract(self):
+        for adapter_type, url in (
+            (PostgresAdapter, "postgresql://user@example/appdb"),
+            (MySQLAdapter, "mysql://user@example/appdb"),
+        ):
+            connection = FakeConnection("appdb")
+            adapter = adapter_type(url, read_only=True, connection_factory=lambda: connection)
+            with self.subTest(adapter=adapter_type.__name__):
+                with self.assertRaises(ReadOnlyError):
+                    adapter.insert_row("users", {"name": "blocked"})
+                with self.assertRaises(ReadOnlyError):
+                    adapter.update_row("users", {"id": 1}, {"name": "blocked"})
+                with self.assertRaises(ReadOnlyError):
+                    adapter.delete_row("users", {"id": 1})
+                with self.assertRaises(UnsupportedQueryError):
+                    adapter.execute_readonly("UPDATE users SET name = %s", ("blocked",))
+                with self.assertRaises(UnsupportedQueryError):
+                    adapter.execute_readonly(
+                        "WITH changed AS (UPDATE users SET name = %s RETURNING id) "
+                        "SELECT * FROM changed",
+                        ("blocked",),
+                    )
 
 
 if __name__ == "__main__":

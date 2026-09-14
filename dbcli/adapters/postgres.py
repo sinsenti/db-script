@@ -66,10 +66,11 @@ class PostgresAdapter(DBAPIAdapter):
                 "AND ccu.constraint_name = tc.constraint_name "
                 "AND ccu.table_schema = tc.table_schema "
                 f"WHERE tc.constraint_schema = {self.placeholder} "
+                f"AND tc.table_schema = {self.placeholder} "
                 f"AND tc.table_name = {self.placeholder} "
                 "AND tc.constraint_type = 'FOREIGN KEY' "
                 "ORDER BY kcu.ordinal_position",
-                (self.schema, table_name),
+                (self.schema, self.schema, table_name),
             )
             rows = cursor.fetchall()
         return [

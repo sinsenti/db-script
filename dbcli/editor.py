@@ -12,7 +12,15 @@ import tempfile
 import termios
 from typing import Any, Sequence
 
-from .ui import RED, RESET, enter_alt_screen
+# Keep the editor module independent from the UI module.  The UI imports
+# these editor functions, so importing UI here would create a cycle.
+RED = "\033[91m"
+RESET = "\033[0m"
+
+
+def _enter_alt_screen() -> None:
+    sys.stdout.write("\033[?1049h\033[?25l")
+    sys.stdout.flush()
 
 
 def _editor_command() -> list[str]:
@@ -45,7 +53,7 @@ def _run_editor(path: str) -> int:
     finally:
         termios.tcsetattr(fd, termios.TCSANOW, old_settings)
         termios.tcflush(fd, termios.TCIFLUSH)
-        enter_alt_screen()
+        _enter_alt_screen()
 
 
 def edit_text_in_nvim(initial_text: str | None, suffix: str = ".sql") -> str | None:

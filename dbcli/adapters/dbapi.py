@@ -24,6 +24,37 @@ from .base import (
 
 
 _READ_QUERY_RE = re.compile(r"^(?:SELECT|WITH|EXPLAIN)\b", re.IGNORECASE)
+_MUTATING_QUERY_RE = re.compile(
+    r"\b(?:INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE|CALL|DO)\b",
+    re.IGNORECASE,
+)
+_SQL_LITERAL_RE = re.compile(
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`",
+    re.DOTALL,
+)
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+
+
+def _contains_mutating_keyword(statement: str) -> bool:
+    """Detect DML/DDL while ignoring quoted values, identifiers and comments."""
+    without_comments = _SQL_COMMENT_RE.sub(" ", statement)
+    without_literals = _SQL_LITERAL_RE.sub(" ", without_comments)
+    return bool(_MUTATING_QUERY_RE.search(without_literals))
+
+
+def _fetch_bounded(cursor: Any, offset: int, limit: int) -> list[tuple[Any, ...]]:
+    """Read only the requested EXPLAIN window without storing all rows."""
+    for _ in range(offset):
+        if cursor.fetchone() is None:
+            return []
+
+    rows: list[tuple[Any, ...]] = []
+    for _ in range(limit):
+        row = cursor.fetchone()
+        if row is None:
+            break
+        rows.append(tuple(row))
+    return rows
 
 
 class DBAPIAdapter(DatabaseAdapter):
@@ -233,12 +264,14 @@ class DBAPIAdapter(DatabaseAdapter):
             "JOIN information_schema.key_column_usage kcu "
             "ON kcu.constraint_schema = tc.constraint_schema "
             "AND kcu.constraint_name = tc.constraint_name "
+            "AND kcu.table_schema = tc.table_schema "
             "AND kcu.table_name = tc.table_name "
             f"WHERE tc.constraint_schema = {self.placeholder} "
+            f"AND tc.table_schema = {self.placeholder} "
             f"AND tc.table_name = {self.placeholder} "
             "AND tc.constraint_type = 'PRIMARY KEY' "
             "ORDER BY kcu.ordinal_position",
-            (self.schema, table_name),
+            (self.schema, self.schema, table_name),
         )
         return [str(row[0]) for row in cursor.fetchall()]
 
@@ -364,16 +397,21 @@ class DBAPIAdapter(DatabaseAdapter):
             raise UnsupportedQueryError("A non-empty read-only SQL query is required")
 
         statement = sql.strip().rstrip(";").strip()
-        if not _READ_QUERY_RE.match(statement):
+        if (
+            not _READ_QUERY_RE.match(statement)
+            or ";" in statement
+            or _contains_mutating_keyword(statement)
+        ):
             raise UnsupportedQueryError(
-                "Only SELECT, WITH and EXPLAIN statements are allowed here"
+                "Only single-statement SELECT, read-only WITH and EXPLAIN queries are allowed here"
             )
 
         with self._cursor() as (_, cursor):
             if statement.upper().startswith("EXPLAIN"):
                 cursor.execute(statement, tuple(params))
-                rows = cursor.fetchall()[offset : offset + limit]
-                return QueryResult(self._headers(cursor), [tuple(row) for row in rows])
+                return QueryResult(
+                    self._headers(cursor), _fetch_bounded(cursor, offset, limit)
+                )
 
             wrapped_sql = (
                 f"SELECT * FROM ({statement}) AS _dbcli_query "

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "db-script"
+version = "0.1.0"
+description = "Keyboard-driven SQLite, PostgreSQL and MySQL terminal database browser"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["prompt-toolkit>=3.0"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+mysql = ["mysql-connector-python>=8.0"]
+dev = [
+    "psycopg[binary]>=3.1",
+    "mysql-connector-python>=8.0",
+]
+
+[project.scripts]
+dbcli = "db:main"
+
+[tool.setuptools]
+py-modules = ["db"]
+
+[tool.setuptools.packages.find]
+include = ["dbcli*"]

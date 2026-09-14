@@ -11,10 +11,10 @@ Goal: turn `db.py` into a safe, tested, installable terminal database browser. K
 - [x] Add safe identifier quoting and validated sort-column handling.
 - [x] Keep the UI independent from the database implementation through an adapter contract.
 - [x] Extract low-level terminal rendering, input, styling and clipboard helpers into `dbcli/ui.py`.
-- [ ] Move higher-level menus and browser screens from `db.py` into `dbcli/ui.py`.
+- [x] Move higher-level menus and browser screens from `db.py` into `dbcli/ui.py`.
 - [x] Move export functions and database discovery into separate modules.
 - [x] Move editor integration into `dbcli/editor.py`.
-- [ ] Remove duplicated legacy database functions after each backend is migrated.
+- [x] Remove migrated SQLite wrappers and isolate the remaining Docker/`--cli` compatibility paths in `dbcli/legacy.py`.
 
 ## Phase 2 — Database adapters and tests
 
@@ -29,7 +29,7 @@ Goal: turn `db.py` into a safe, tested, installable terminal database browser. K
 - [x] Implement a native `PostgresAdapter` using optional `psycopg`.
 - [x] Implement a native `MySQLAdapter` using optional `mysql-connector-python`.
 - [x] Keep the existing CLI/subprocess path as an explicit `--cli` fallback and as a dependency fallback.
-- [ ] Add PostgreSQL/MySQL integration tests using Docker.
+- [x] Add opt-in PostgreSQL/MySQL integration tests for Docker-published services.
 - [x] Add adapter contract tests for SQLite, PostgreSQL and MySQL adapter behavior.
 
 ## Phase 3 — Safety and reliability

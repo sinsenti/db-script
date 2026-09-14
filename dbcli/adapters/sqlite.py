@@ -190,6 +190,23 @@ class SQLiteAdapter(DatabaseAdapter):
         headers = [description[0] for description in cursor.description or []]
         return QueryResult(headers, [tuple(row) for row in rows])
 
+    @staticmethod
+    def _fetch_bounded(
+        cursor: sqlite3.Cursor, offset: int, limit: int
+    ) -> list[tuple[Any, ...]]:
+        """Read only the requested EXPLAIN window without storing all rows."""
+        for _ in range(offset):
+            if cursor.fetchone() is None:
+                return []
+
+        rows: list[tuple[Any, ...]] = []
+        for _ in range(limit):
+            row = cursor.fetchone()
+            if row is None:
+                break
+            rows.append(tuple(row))
+        return rows
+
     def list_tables(self, include_views: bool = False) -> list[str]:
         if include_views:
             type_clause = "type IN ('table', 'view')"
@@ -416,8 +433,9 @@ class SQLiteAdapter(DatabaseAdapter):
             try:
                 if statement.upper().startswith("EXPLAIN"):
                     cursor = connection.execute(statement, tuple(params))
-                    rows = cursor.fetchall()[offset : offset + limit]
-                    return self._result(cursor, rows)
+                    return self._result(
+                        cursor, self._fetch_bounded(cursor, offset, limit)
+                    )
 
                 wrapped_sql = (
                     f"SELECT * FROM ({statement}) AS _dbcli_query "

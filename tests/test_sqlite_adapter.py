@@ -157,6 +157,10 @@ class SQLiteAdapterTests(unittest.TestCase):
             "SELECT id, name FROM users ORDER BY id", limit=1, offset=1
         )
         self.assertEqual(result.rows, [(2, "O'Reilly")])
+        explain = self.adapter.execute_readonly(
+            "EXPLAIN SELECT id FROM users", limit=2, offset=1
+        )
+        self.assertLessEqual(len(explain.rows), 2)
         with self.assertRaises(AdapterError):
             self.adapter.execute_readonly("SELECT 1; SELECT 2")
 
