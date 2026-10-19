@@ -12,7 +12,9 @@ python db.py postgresql://user:password@host:5432/database
 
 Install optional native drivers with `pip install 'db-script[postgres,mysql]'`.
 Direct PostgreSQL and MySQL URLs use the native drivers when available; use
-`--cli` to explicitly select the `psql`/`mysql` fallback.
+`--cli` to explicitly select the `psql`/`mysql` fallback. The Docker and CLI
+PostgreSQL browsers list tables from user schemas and show schema-qualified names
+(for example, `app.leads`).
 
 Run tests with:
 

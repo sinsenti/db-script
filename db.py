@@ -692,7 +692,7 @@ def main():
                         sys.stdout.write("\033[?25h")
                         sys.stdout.flush()
                         print(
-                            f" (No public tables found in {engine.upper()} database '{dbname}')"
+                            f" (No tables found in {engine.upper()} database '{dbname}')"
                         )
                         input(" Press Enter to return...")
                         sys.stdout.write("\033[?25l")

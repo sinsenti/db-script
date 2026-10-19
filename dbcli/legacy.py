@@ -24,6 +24,101 @@ from .ui import BOLD, CYAN, DIM, MAGENTA, RED, RESET, YELLOW, select_menu_item
 _FK_CACHE = {}
 
 
+_POSTGRES_RESERVED_WORDS = {
+    "all", "and", "array", "as", "authorization", "between", "both",
+    "case", "cast", "check", "column", "constraint", "create", "current_user",
+    "default", "deferrable", "delete", "distinct", "do", "else", "end",
+    "except", "false", "fetch", "for", "foreign", "from", "grant", "group",
+    "having", "in", "initially", "intersect", "into", "join", "limit",
+    "not", "null", "offset", "on", "only", "or", "order", "primary",
+    "references", "returning", "select", "table", "then", "to", "true",
+    "union", "unique", "update", "user", "using", "values", "when", "where",
+    "window", "with",
+}
+
+
+def _parse_postgres_table_name(table_name):
+    """Parse a table name emitted by the PostgreSQL browser's schema-qualified list."""
+    components = []
+    index = 0
+    text = str(table_name)
+    while index < len(text):
+        if text[index] == '"':
+            index += 1
+            chars = []
+            while index < len(text):
+                if text[index] == '"':
+                    if index + 1 < len(text) and text[index + 1] == '"':
+                        chars.append('"')
+                        index += 2
+                    else:
+                        index += 1
+                        break
+                else:
+                    chars.append(text[index])
+                    index += 1
+            else:
+                raise ValueError(f"Unterminated quoted PostgreSQL identifier: {text}")
+            component = "".join(chars)
+        else:
+            end = text.find(".", index)
+            if end == -1:
+                end = len(text)
+            component = text[index:end]
+            index = end
+        if not component:
+            raise ValueError(f"Invalid PostgreSQL table name: {text}")
+        components.append(component)
+        if index == len(text):
+            break
+        if text[index] != ".":
+            raise ValueError(f"Invalid PostgreSQL table name: {text}")
+        index += 1
+    if len(components) == 1:
+        return "public", components[0]
+    if len(components) == 2:
+        return components[0], components[1]
+    raise ValueError(f"Invalid PostgreSQL table name: {text}")
+
+
+def _quote_postgres_identifier(identifier):
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _postgres_table_reference(table_name):
+    schema, table = _parse_postgres_table_name(table_name)
+    return f"{_quote_postgres_identifier(schema)}.{_quote_postgres_identifier(table)}"
+
+
+def _postgres_display_table_name(schema, table):
+    def display_part(value):
+        if (
+            re.fullmatch(r"[a-z_][a-z0-9_$]*", value)
+            and value.lower() not in _POSTGRES_RESERVED_WORDS
+        ):
+            return value
+        return _quote_postgres_identifier(value)
+
+    return f"{display_part(schema)}.{display_part(table)}"
+
+
+def _postgres_table_parts_sql(table_name):
+    schema, table = _parse_postgres_table_name(table_name)
+    return (
+        schema.replace("'", "''"),
+        table.replace("'", "''"),
+    )
+
+
+def _postgres_table_names_from_output(output):
+    names = []
+    for line in output.splitlines() if output else []:
+        if line.strip():
+            schema, table = json.loads(line)
+            names.append(_postgres_display_table_name(schema, table))
+    return sorted(names)
+
+
 # -------------------------------------------------------------------
 #  INDEX, CONSTRAINT & TRIGGER INSPECTOR
 # -------------------------------------------------------------------
@@ -91,8 +186,14 @@ def get_index_and_constraint_info(engine, container, dbname_or_path, table_name)
                 else lambda cmd: run_docker_cmd_with_err(cmd)[0]
             )
 
+            schema_name, relation_name = _postgres_table_parts_sql(table_name)
+            table_ref_literal = _postgres_table_reference(table_name).replace("'", "''")
+
             # Indexes
-            sql_idx = f"SELECT indexname, indexdef FROM pg_indexes WHERE tablename = '{table_name}' AND schemaname = 'public';"
+            sql_idx = (
+                "SELECT indexname, indexdef FROM pg_indexes "
+                f"WHERE tablename = '{relation_name}' AND schemaname = '{schema_name}';"
+            )
             cmd = (
                 [
                     "docker",
@@ -129,7 +230,7 @@ def get_index_and_constraint_info(engine, container, dbname_or_path, table_name)
             # Constraints
             sql_con = (
                 f"SELECT conname, contype, pg_get_constraintdef(oid) "
-                f"FROM pg_constraint WHERE conrelid = '\"{table_name}\"'::regclass;"
+                f"FROM pg_constraint WHERE conrelid = '{table_ref_literal}'::regclass;"
             )
             cmd_con = (
                 [
@@ -171,7 +272,12 @@ def get_index_and_constraint_info(engine, container, dbname_or_path, table_name)
             info_lines.append("")
 
             # Triggers
-            sql_trg = f"SELECT trigger_name, event_manipulation, action_statement FROM information_schema.triggers WHERE event_object_table = '{table_name}';"
+            sql_trg = (
+                "SELECT trigger_name, event_manipulation, action_statement "
+                "FROM information_schema.triggers "
+                f"WHERE event_object_table = '{relation_name}' "
+                f"AND event_object_schema = '{schema_name}';"
+            )
             cmd_trg = (
                 [
                     "docker",
@@ -315,10 +421,12 @@ def get_direct_postgres_tables(conn_url):
         conn_url,
         "-At",
         "-c",
-        "SELECT tablename FROM pg_tables WHERE schemaname='public';",
+        "SELECT json_build_array(schemaname, tablename)::text FROM pg_tables "
+        "WHERE schemaname !~ '^pg_' AND schemaname <> 'information_schema' "
+        "ORDER BY schemaname, tablename;",
     ]
     out, _ = run_docker_cmd_with_err(cmd)
-    return sorted([t for t in out.split("\n") if t]) if out else []
+    return _postgres_table_names_from_output(out)
 
 
 def query_direct_postgres_page(
@@ -334,8 +442,12 @@ def query_direct_postgres_page(
     else:
         where_sql = ""
 
-    order_sql = f'ORDER BY t."{order_by[0]}" {order_by[1]}' if order_by else ""
-    sql = f'COPY (SELECT * FROM "{table}" t {where_sql} {order_sql} LIMIT {limit} OFFSET {offset}) TO STDOUT WITH CSV HEADER;'
+    order_sql = (
+        f'ORDER BY t.{_quote_postgres_identifier(order_by[0])} {order_by[1]}'
+        if order_by
+        else ""
+    )
+    sql = f"COPY (SELECT * FROM {_postgres_table_reference(table)} t {where_sql} {order_sql} LIMIT {limit} OFFSET {offset}) TO STDOUT WITH CSV HEADER;"
     cmd = ["psql", conn_url, "-c", sql]
     output, err_msg = run_docker_cmd_with_err(cmd)
 
@@ -365,7 +477,7 @@ def update_direct_postgres_row(conn_url, table_name, headers, orig_row, updated_
         [f'"{k}" = {format_sql_value(v)}' for k, v in changed.items()]
     )
     where_sql = build_where_clause(headers, orig_row)
-    sql = f'UPDATE "{table_name}" SET {set_clause} WHERE {where_sql};'
+    sql = f'UPDATE {_postgres_table_reference(table_name)} SET {set_clause} WHERE {where_sql};'
     cmd = ["psql", conn_url, "-c", sql]
     _, err = run_docker_cmd_with_err(cmd)
     return err is None
@@ -379,7 +491,7 @@ def insert_direct_postgres_row(conn_url, table_name, row_dict):
     ]
     cols_sql = ", ".join([f'"{c}"' for c in cols])
     vals_sql = ", ".join(vals)
-    sql = f'INSERT INTO "{table_name}" ({cols_sql}) VALUES ({vals_sql});'
+    sql = f'INSERT INTO {_postgres_table_reference(table_name)} ({cols_sql}) VALUES ({vals_sql});'
     cmd = ["psql", conn_url, "-c", sql]
     _, err = run_docker_cmd_with_err(cmd)
     return err is None
@@ -387,7 +499,7 @@ def insert_direct_postgres_row(conn_url, table_name, row_dict):
 
 def delete_direct_postgres_row(conn_url, table_name, headers, orig_row):
     where_sql = build_where_clause(headers, orig_row)
-    sql = f'DELETE FROM "{table_name}" WHERE {where_sql};'
+    sql = f'DELETE FROM {_postgres_table_reference(table_name)} WHERE {where_sql};'
     cmd = ["psql", conn_url, "-c", sql]
     _, err = run_docker_cmd_with_err(cmd)
     return err is None
@@ -403,7 +515,7 @@ def count_direct_postgres_rows(conn_url, table_name, filter_query=None):
             where_sql = f"WHERE CAST(row_to_json(t) AS text) ILIKE '%{safe_filter}%'"
     else:
         where_sql = ""
-    sql = f'SELECT COUNT(*) FROM "{table_name}" t {where_sql};'
+    sql = f'SELECT COUNT(*) FROM {_postgres_table_reference(table_name)} t {where_sql};'
     cmd = ["psql", conn_url, "-At", "-c", sql]
     out, _ = run_docker_cmd_with_err(cmd)
     try:
@@ -413,9 +525,12 @@ def count_direct_postgres_rows(conn_url, table_name, filter_query=None):
 
 
 def get_direct_postgres_schema_info(conn_url, table_name):
+    schema_name, relation_name = _postgres_table_parts_sql(table_name)
     sql = (
-        f"SELECT column_name, data_type, is_nullable, column_default "
-        f"FROM information_schema.columns WHERE table_name = '{table_name}' ORDER BY ordinal_position;"
+        "SELECT column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns "
+        f"WHERE table_schema = '{schema_name}' AND table_name = '{relation_name}' "
+        "ORDER BY ordinal_position;"
     )
     cmd = ["psql", conn_url, "-At", "-F", "|", "-c", sql]
     output, _ = run_docker_cmd_with_err(cmd)
@@ -432,15 +547,19 @@ def get_direct_postgres_foreign_keys(conn_url, table_name):
     cache_key = ("direct_postgres", conn_url, table_name)
     if cache_key in _FK_CACHE:
         return _FK_CACHE[cache_key]
+    schema_name, relation_name = _postgres_table_parts_sql(table_name)
     sql = (
-        "SELECT a1.attname AS from_col, c2.relname AS to_table, a2.attname AS to_col "
+        "SELECT a1.attname AS from_col, n2.nspname AS to_schema, "
+        "c2.relname AS to_table, a2.attname AS to_col "
         "FROM pg_constraint k "
         "JOIN pg_class c1 ON c1.oid = k.conrelid "
         "JOIN pg_namespace n1 ON n1.oid = c1.relnamespace "
         "JOIN pg_class c2 ON c2.oid = k.confrelid "
+        "JOIN pg_namespace n2 ON n2.oid = c2.relnamespace "
         "JOIN pg_attribute a1 ON a1.attrelid = c1.oid AND a1.attnum = k.conkey[1] "
         "JOIN pg_attribute a2 ON a2.attrelid = c2.oid AND a2.attnum = k.confkey[1] "
-        f"WHERE k.contype = 'f' AND c1.relname = '{table_name}' AND n1.nspname = 'public';"
+        f"WHERE k.contype = 'f' AND c1.relname = '{relation_name}' "
+        f"AND n1.nspname = '{schema_name}';"
     )
     cmd = ["psql", conn_url, "-At", "-F", "|", "-c", sql]
     output, _ = run_docker_cmd_with_err(cmd)
@@ -449,8 +568,14 @@ def get_direct_postgres_foreign_keys(conn_url, table_name):
         for line in output.split("\n"):
             if line.strip():
                 p = line.split("|")
-                if len(p) == 3:
-                    fks.append({"from_col": p[0], "to_table": p[1], "to_col": p[2]})
+                if len(p) == 4:
+                    fks.append(
+                        {
+                            "from_col": p[0],
+                            "to_table": _postgres_display_table_name(p[1], p[2]),
+                            "to_col": p[3],
+                        }
+                    )
     _FK_CACHE[cache_key] = fks
     return fks
 
@@ -657,15 +782,19 @@ def get_foreign_keys(engine, container, dbname_or_path, table_name):
             fks = SQLiteAdapter(dbname_or_path).foreign_keys(table_name)
         elif engine == "postgres":
             user = get_container_env_user(container, "postgres")
+            schema_name, relation_name = _postgres_table_parts_sql(table_name)
             sql = (
-                "SELECT a1.attname AS from_col, c2.relname AS to_table, a2.attname AS to_col "
+                "SELECT a1.attname AS from_col, n2.nspname AS to_schema, "
+                "c2.relname AS to_table, a2.attname AS to_col "
                 "FROM pg_constraint k "
                 "JOIN pg_class c1 ON c1.oid = k.conrelid "
                 "JOIN pg_namespace n1 ON n1.oid = c1.relnamespace "
                 "JOIN pg_class c2 ON c2.oid = k.confrelid "
+                "JOIN pg_namespace n2 ON n2.oid = c2.relnamespace "
                 "JOIN pg_attribute a1 ON a1.attrelid = c1.oid AND a1.attnum = k.conkey[1] "
                 "JOIN pg_attribute a2 ON a2.attrelid = c2.oid AND a2.attnum = k.confkey[1] "
-                f"WHERE k.contype = 'f' AND c1.relname = '{table_name}' AND n1.nspname = 'public';"
+                f"WHERE k.contype = 'f' AND c1.relname = '{relation_name}' "
+                f"AND n1.nspname = '{schema_name}';"
             )
             cmd = [
                 "docker",
@@ -688,9 +817,13 @@ def get_foreign_keys(engine, container, dbname_or_path, table_name):
                 for line in output.split("\n"):
                     if line.strip():
                         p = line.split("|")
-                        if len(p) == 3:
+                        if len(p) == 4:
                             fks.append(
-                                {"from_col": p[0], "to_table": p[1], "to_col": p[2]}
+                                {
+                                    "from_col": p[0],
+                                    "to_table": _postgres_display_table_name(p[1], p[2]),
+                                    "to_col": p[3],
+                                }
                             )
         elif engine == "mysql":
             user = get_container_env_user(container, "mysql")
@@ -743,7 +876,7 @@ def count_postgres_rows(container, dbname, table_name, filter_query=None):
     else:
         where_sql = ""
 
-    sql = f'SELECT COUNT(*) FROM "{table_name}" t {where_sql};'
+    sql = f'SELECT COUNT(*) FROM {_postgres_table_reference(table_name)} t {where_sql};'
     cmd = [
         "docker",
         "exec",
@@ -801,9 +934,12 @@ def count_mysql_rows(container, dbname, table_name, filter_query=None):
 def get_postgres_schema_info(container, dbname, table_name):
     """Fetches schema info for Postgres table."""
     user = get_container_env_user(container, "postgres")
+    schema_name, relation_name = _postgres_table_parts_sql(table_name)
     sql = (
-        f"SELECT column_name, data_type, is_nullable, column_default "
-        f"FROM information_schema.columns WHERE table_name = '{table_name}' ORDER BY ordinal_position;"
+        "SELECT column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns "
+        f"WHERE table_schema = '{schema_name}' AND table_name = '{relation_name}' "
+        "ORDER BY ordinal_position;"
     )
     cmd = [
         "docker",
@@ -912,7 +1048,7 @@ def insert_postgres_row(container, dbname, table_name, row_dict):
             vals.append(format_sql_value(v))
     cols_sql = ", ".join([f'"{c}"' for c in cols])
     vals_sql = ", ".join(vals)
-    sql = f'INSERT INTO "{table_name}" ({cols_sql}) VALUES ({vals_sql});'
+    sql = f'INSERT INTO {_postgres_table_reference(table_name)} ({cols_sql}) VALUES ({vals_sql});'
     cmd = [
         "docker",
         "exec",
@@ -983,7 +1119,7 @@ def update_postgres_row(container, dbname, table_name, headers, orig_row, update
     )
     where_sql = build_where_clause(headers, orig_row)
 
-    sql = f'UPDATE "{table_name}" SET {set_clause} WHERE {where_sql};'
+    sql = f'UPDATE {_postgres_table_reference(table_name)} SET {set_clause} WHERE {where_sql};'
     cmd = [
         "docker",
         "exec",
@@ -1010,7 +1146,7 @@ def delete_postgres_row(container, dbname, table_name, headers, orig_row):
     user = get_container_env_user(container, "postgres")
     where_sql = build_where_clause(headers, orig_row)
 
-    sql = f'DELETE FROM "{table_name}" WHERE {where_sql};'
+    sql = f'DELETE FROM {_postgres_table_reference(table_name)} WHERE {where_sql};'
     cmd = [
         "docker",
         "exec",
@@ -1202,10 +1338,12 @@ def get_postgres_tables(container, dbname):
         dbname,
         "-At",
         "-c",
-        "SELECT tablename FROM pg_tables WHERE schemaname='public';",
+        "SELECT json_build_array(schemaname, tablename)::text FROM pg_tables "
+        "WHERE schemaname !~ '^pg_' AND schemaname <> 'information_schema' "
+        "ORDER BY schemaname, tablename;",
     ]
     output = run_docker_cmd(cmd)
-    return sorted([t for t in output.split("\n") if t]) if output else []
+    return _postgres_table_names_from_output(output)
 
 
 def query_postgres_page(
@@ -1222,9 +1360,13 @@ def query_postgres_page(
     else:
         where_sql = ""
 
-    order_sql = f'ORDER BY t."{order_by[0]}" {order_by[1]}' if order_by else ""
+    order_sql = (
+        f'ORDER BY t.{_quote_postgres_identifier(order_by[0])} {order_by[1]}'
+        if order_by
+        else ""
+    )
 
-    sql = f'COPY (SELECT * FROM "{table}" t {where_sql} {order_sql} LIMIT {limit} OFFSET {offset}) TO STDOUT WITH CSV HEADER;'
+    sql = f"COPY (SELECT * FROM {_postgres_table_reference(table)} t {where_sql} {order_sql} LIMIT {limit} OFFSET {offset}) TO STDOUT WITH CSV HEADER;"
     cmd = [
         "docker",
         "exec",
