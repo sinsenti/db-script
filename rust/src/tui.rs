@@ -231,6 +231,10 @@ fn notice(_guard: &mut TerminalGuard, message: &str) -> io::Result<()> {
     Ok(())
 }
 fn value_text(v: &Value) -> String {
+    if let Some(text) = crate::pg_read::scalar_text(v) {
+        return text.into();
+    }
+
     if v.is_null() {
         "NULL".into()
     } else if let Some(s) = v.as_str() {
@@ -574,6 +578,14 @@ fn browse_with_filter(
         cursor = cursor.min(current.rows.len().saturating_sub(1));
         let mut completions =
             crate::completion::candidates(&current.headers, &current.rows, &tables);
+        if adapter.is_postgres() {
+            completions.retain(|c| !c.contains("json_extract("));
+            completions.extend(
+                crate::pg_read::Reader::new(crate::pg_read::BlobStyle::Base64)
+                    .completions(table, &current.headers, &current.rows, raw.as_deref())
+                    .map_err(|e| DbError::new(e.kind, e.message))?,
+            );
+        }
         if raw.is_none() {
             for fk in adapter.navigation_foreign_keys(table)? {
                 completions.push(format!(
@@ -813,11 +825,29 @@ fn browse_with_filter(
                         } else if let Some(choice) = pick_foreign_key(&candidates, guard)? {
                             let fk = candidates[choice].0;
                             let val = &candidates[choice].1;
-                            let next_filter = format!(
-                                "{} = {}",
-                                crate::quote_identifier(&fk.to_col).unwrap_or_default(),
-                                sql_export_literal(val)
-                            );
+                            let next_filter = if !fk.pairs.is_empty() {
+                                fk.pairs
+                                    .iter()
+                                    .map(|p| {
+                                        format!(
+                                            "{} = {}",
+                                            crate::quote_identifier(p["to_col"].as_str().unwrap())
+                                                .unwrap(),
+                                            crate::pg_read::sql_literal(
+                                                &item[p["from_col"].as_str().unwrap()]
+                                            )
+                                            .unwrap()
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" AND ")
+                            } else {
+                                format!(
+                                    "{} = {}",
+                                    crate::quote_identifier(&fk.to_col).unwrap_or_default(),
+                                    sql_export_literal(val)
+                                )
+                            };
                             browse_with_filter(
                                 adapter,
                                 &fk.to_table,
@@ -1071,8 +1101,16 @@ fn browse_with_filter(
                 } else {
                     format!("{table}_marked")
                 };
-                let path = export(table, &prefix, &hs, &rs, &typ)
-                    .map_err(|e| DbError::adapter(e.to_string()))?;
+                let path = export(
+                    table,
+                    &prefix,
+                    &hs,
+                    &rs,
+                    &typ,
+                    adapter.is_postgres(),
+                    raw.as_deref(),
+                )
+                .map_err(|e| DbError::adapter(e.to_string()))?;
                 notice(guard, &format!("Exported to {}", path.display()))
                     .map_err(|e| DbError::adapter(e.to_string()))?;
             }
@@ -1147,6 +1185,9 @@ fn bulk_edit(
     Ok(())
 }
 fn sql_export_literal(value: &Value) -> String {
+    if crate::pg_read::scalar_text(value).is_some() {
+        return crate::pg_read::sql_literal(value).unwrap_or_else(|_| "NULL".into());
+    }
     if value.is_null() {
         return "NULL".into();
     }
@@ -1204,6 +1245,8 @@ fn export(
     headers: &[String],
     rows: &[Vec<Value>],
     kind: &str,
+    postgres: bool,
+    raw: Option<&str>,
 ) -> io::Result<PathBuf> {
     let stem = prefix.replace('/', "_");
     let ext = match kind {
@@ -1212,6 +1255,14 @@ fn export(
         _ => "json",
     };
     let path = PathBuf::from(format!("{stem}.{ext}"));
+    if postgres && ext == "sql" {
+        let text = crate::pg_read::Reader::new(crate::pg_read::BlobStyle::Base64)
+            .sql_export(table, headers, rows, raw)
+            .map_err(io::Error::other)?;
+        fs::write(&path, text)?;
+        return Ok(path);
+    }
+
     match ext {
         "json" => {
             let values: Vec<Map<String, Value>> = rows
@@ -1266,7 +1317,7 @@ fn export(
                 .join(", ");
             for row in rows {
                 out.push_str(&format!(
-                    "INSERT INTO \"{}\" ({qh}) VALUES ({});\n",
+                    "INSERT INTO {} ({qh}) VALUES ({});\n",
                     table.replace('"', "\"\""),
                     row.iter()
                         .map(|v| if v.is_null() {
@@ -1284,6 +1335,10 @@ fn export(
     Ok(path)
 }
 fn csv_value(value: &Value) -> String {
+    if let Some(text) = crate::pg_read::scalar_text(value) {
+        return text.into();
+    }
+
     if value.is_null() {
         String::new()
     } else {

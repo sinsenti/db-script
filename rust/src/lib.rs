@@ -14,6 +14,7 @@ use std::{
 };
 
 pub mod completion;
+pub mod pg_read;
 pub mod remote;
 pub mod render;
 pub mod tui;
@@ -57,6 +58,7 @@ impl std::error::Error for DbError {}
 pub struct SQLiteAdapter {
     path: PathBuf,
     read_only: bool,
+    postgres: bool,
     trace: Rc<RefCell<Vec<TraceEntry>>>,
 }
 impl SQLiteAdapter {
@@ -64,8 +66,23 @@ impl SQLiteAdapter {
         Self {
             path: path.as_ref().to_path_buf(),
             read_only,
+            postgres: false,
             trace: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+    pub fn postgres() -> Self {
+        let mut a = Self::new("PostgreSQL", true);
+        a.postgres = true;
+        a
+    }
+    pub fn is_postgres(&self) -> bool {
+        self.postgres
+    }
+    fn pg<T: serde::de::DeserializeOwned>(&self, op: Value) -> Result<T, DbError> {
+        let v = pg_read::Reader::new(pg_read::BlobStyle::Base64)
+            .operation(&op)
+            .map_err(|e| DbError::new(e.kind, e.message))?;
+        serde_json::from_value(v).map_err(|_| DbError::adapter("PostgreSQL result shape mismatch"))
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -86,6 +103,11 @@ impl SQLiteAdapter {
         });
     }
     fn connect(&self) -> Result<Connection, DbError> {
+        if self.postgres {
+            return Err(DbError::adapter(
+                "PostgreSQL cannot use a SQLite connection",
+            ));
+        }
         let path_string = self.path.to_string_lossy().to_string();
         let opened = if self.read_only {
             Connection::open_with_flags(
@@ -177,6 +199,10 @@ impl SQLiteAdapter {
         vec![self.path.to_string_lossy().to_string()]
     }
     pub fn list_tables(&self, include_views: bool) -> Result<Vec<String>, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"list_tables","include_views":include_views}));
+        }
+
         let conn = self.connect()?;
         let type_clause = if include_views {
             "type IN ('table', 'view')"
@@ -194,6 +220,10 @@ impl SQLiteAdapter {
         Ok(tables)
     }
     pub fn schema_info(&self, table: &str) -> Result<QueryResult, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"schema","table":table}));
+        }
+
         let conn = self.connect()?;
         let info = self.table_info_conn(&conn, table)?;
         Ok(QueryResult {
@@ -221,6 +251,10 @@ impl SQLiteAdapter {
         })
     }
     pub fn foreign_keys(&self, table: &str) -> Result<Vec<ForeignKey>, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"foreign_keys","table":table}));
+        }
+
         let conn = self.connect()?;
         self.table_info_conn(&conn, table)?;
         let sql = format!("PRAGMA foreign_key_list({})", quote_identifier(table)?);
@@ -229,6 +263,7 @@ impl SQLiteAdapter {
         let keys = stmt
             .query_map([], |r| {
                 Ok(ForeignKey {
+                    pairs: vec![],
                     from_col: r.get(3)?,
                     to_table: r.get(2)?,
                     to_col: r
@@ -242,6 +277,10 @@ impl SQLiteAdapter {
         Ok(keys)
     }
     pub fn navigation_foreign_keys(&self, table: &str) -> Result<Vec<ForeignKey>, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"navigation_foreign_keys","table":table}));
+        }
+
         let conn = self.connect()?;
         let mut keys = self.foreign_keys(table)?;
         let mut stmt = conn
@@ -269,6 +308,10 @@ impl SQLiteAdapter {
         Ok(keys)
     }
     pub fn primary_keys(&self, table: &str) -> Result<Vec<String>, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"primary_keys","table":table}));
+        }
+
         self.pk_conn(&self.connect()?, table)
     }
     pub fn apply_batch(&self, table: &str, actions: &[Value]) -> Result<usize, DbError> {
@@ -298,6 +341,10 @@ impl SQLiteAdapter {
         filter: Option<&str>,
         sort: Option<&[String]>,
     ) -> Result<QueryResult, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"page","table":table,"limit":limit,"offset":offset,"filter":filter,"sort":sort}));
+        }
+
         validate_page(limit, offset)?;
         let conn = self.connect()?;
         let (where_sql, mut params, order) = self.filter_order(&conn, table, filter, sort)?;
@@ -316,6 +363,10 @@ impl SQLiteAdapter {
         Ok(QueryResult { headers, rows })
     }
     pub fn count_rows(&self, table: &str, filter: Option<&str>) -> Result<i64, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"count","table":table,"filter":filter}));
+        }
+
         let conn = self.connect()?;
         let (where_sql, params, _) = self.filter_order(&conn, table, filter, None)?;
         let sql = format!(
@@ -363,6 +414,10 @@ impl SQLiteAdapter {
         filter: Option<&str>,
         sort: Option<&[String]>,
     ) -> Result<QueryResult, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"raw_page","sql":sql,"limit":limit,"offset":offset,"filter":filter,"sort":sort}));
+        }
+
         if sql.trim_start().to_ascii_uppercase().starts_with("EXPLAIN") {
             if filter.is_some_and(|s| !s.is_empty()) || sort.is_some() {
                 return Err(DbError::adapter(
@@ -385,6 +440,10 @@ impl SQLiteAdapter {
         )
     }
     pub fn raw_count(&self, sql: &str, filter: Option<&str>) -> Result<i64, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"raw_count","sql":sql,"filter":filter}));
+        }
+
         if sql.trim_start().to_ascii_uppercase().starts_with("EXPLAIN") {
             return Ok(self.execute_readonly(sql, &[], 100000, 0)?.rows.len() as i64);
         }
@@ -411,6 +470,11 @@ impl SQLiteAdapter {
         limit: i64,
         offset: i64,
     ) -> Result<QueryResult, DbError> {
+        if self.postgres {
+            return self
+                .pg(json!({"op":"raw","sql":sql,"params":params,"limit":limit,"offset":offset}));
+        }
+
         validate_page(limit, offset)?;
         if sql.trim().is_empty() {
             return Err(DbError::new(
@@ -505,6 +569,10 @@ impl SQLiteAdapter {
     }
     /// Return an interactive inspector view of table indexes, foreign keys and triggers.
     pub fn indexes(&self, table: &str) -> Result<QueryResult, DbError> {
+        if self.postgres {
+            return self.pg(json!({"op":"inspector","table":table}));
+        }
+
         let conn = self.connect()?;
         self.table_info_conn(&conn, table)?;
         let mut rows = Vec::new();
@@ -614,6 +682,8 @@ pub struct ForeignKey {
     pub from_col: String,
     pub to_table: String,
     pub to_col: String,
+    #[serde(default, skip_serializing)]
+    pub pairs: Vec<Value>,
 }
 #[derive(Debug, Clone)]
 struct TableColumn {
@@ -1019,7 +1089,7 @@ fn query_window(
     Ok(result)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProtocolRequest {
     pub op: String,
     #[serde(default)]
@@ -1062,6 +1132,17 @@ struct ProtocolResponse<T: Serialize> {
 }
 impl SQLiteAdapter {
     pub fn protocol(&self, req: ProtocolRequest) -> Value {
+        if self.postgres {
+            return match pg_read::Reader::new(pg_read::BlobStyle::Base64)
+                .operation(&serde_json::to_value(&req).unwrap())
+            {
+                Ok(v) => json!({"ok":true,"result":v,"trace":[]}),
+                Err(e) => {
+                    json!({"ok":false,"error":{"class":e.kind,"message":e.message},"trace":[]})
+                }
+            };
+        }
+
         self.clear_trace();
         let result: Result<Value, DbError> = (|| {
             let table = || {

@@ -11,7 +11,7 @@ use std::{
 };
 
 fn usage() {
-    println!("dbcli-rust 0.1.0 — SQLite terminal browser\n\nUSAGE:\n  dbcli-rust [OPTIONS] [DATABASE]\n\nOPTIONS:\n  --db PATH          SQLite database path\n  --read-only        Refuse writes and hide mutation actions\n  --protocol         Persistent JSONL parity/automation runner\n  --engine ENGINE    Protocol backend: postgres or mysql (uses DBCLI_*_URL)\n  --list-tables      Print table names as JSON\n  --schema TABLE     Print schema metadata as JSON\n  --query SQL        Run bounded SELECT/WITH/EXPLAIN query\n  --table TABLE      Open this table directly in the browser\n  --limit N          Query result bound (default 50)\n  --offset N         Query result offset (default 0)\n  --version          Print version\n  -h, --help         Show this help");
+    println!("dbcli-rust 0.1.0 — SQLite terminal browser\n\nUSAGE:\n  dbcli-rust [OPTIONS] [DATABASE]\n\nOPTIONS:\n  --db PATH          SQLite database path\n  --read-only        Refuse writes and hide mutation actions\n  --protocol         Persistent JSONL parity/automation runner\n  --postgres         Read-only PostgreSQL browser (DBCLI_POSTGRES_URL)\n  --engine ENGINE    Protocol backend: postgres or mysql (uses DBCLI_*_URL)\n  --list-tables      Print table names as JSON\n  --schema TABLE     Print schema metadata as JSON\n  --query SQL        Run bounded SELECT/WITH/EXPLAIN query\n  --table TABLE      Open this table directly in the browser\n  --limit N          Query result bound (default 50)\n  --offset N         Query result offset (default 0)\n  --version          Print version\n  -h, --help         Show this help");
 }
 fn main() {
     let mut args = env::args().skip(1);
@@ -38,6 +38,10 @@ fn main() {
             "--read-only" => read_only = true,
             "--protocol" => protocol = true,
             "--engine" => engine = args.next(),
+            "--postgres" => {
+                engine = Some("postgres".into());
+                read_only = true;
+            }
             "--db" => database = args.next().map(PathBuf::from),
             "--list-tables" => list = true,
             "--schema" => schema = args.next(),
@@ -58,8 +62,13 @@ fn main() {
                 eprintln!("{}", error.message);
                 process::exit(2)
             });
-            let adapter = RemoteAdapter::new(engine, read_only);
-            run_protocol(|request| adapter.protocol(request));
+            if engine == RemoteEngine::Postgres {
+                let adapter = SQLiteAdapter::postgres();
+                run_protocol(|request| adapter.protocol(request));
+            } else {
+                let adapter = RemoteAdapter::new(engine, read_only);
+                run_protocol(|request| adapter.protocol(request));
+            }
         } else {
             let database = database.unwrap_or_else(|| {
                 eprintln!("a SQLite path is required for the SQLite protocol");
@@ -70,26 +79,35 @@ fn main() {
         }
         return;
     }
-    if engine.is_some() {
+    let postgres = engine.as_deref() == Some("postgres");
+    if engine.is_some() && !postgres {
         eprintln!("--engine is supported only with --protocol");
         process::exit(2);
     }
-    let database = match database {
-        Some(path) => path,
-        None => match tui::select_database() {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("No SQLite database selected; pass DATABASE or --db PATH");
-                return;
-            }
-            Err(error) => fail(error),
-        },
+    let database = if postgres {
+        PathBuf::from("PostgreSQL")
+    } else {
+        match database {
+            Some(path) => path,
+            None => match tui::select_database() {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    eprintln!("No SQLite database selected; pass DATABASE or --db PATH");
+                    return;
+                }
+                Err(error) => fail(error),
+            },
+        }
     };
-    if !database.exists() {
+    if !postgres && !database.exists() {
         eprintln!("database does not exist: {}", database.display());
         process::exit(2)
     }
-    let adapter = SQLiteAdapter::new(&database, read_only);
+    let adapter = if postgres {
+        SQLiteAdapter::postgres()
+    } else {
+        SQLiteAdapter::new(&database, read_only)
+    };
     if list {
         match adapter.list_tables(true) {
             Ok(t) => println!("{}", serde_json::to_string_pretty(&t).unwrap()),

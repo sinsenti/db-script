@@ -4,6 +4,10 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 fn cell_text(value: &Value) -> String {
+    if let Some(text) = crate::pg_read::scalar_text(value) {
+        return text.into();
+    }
+
     match value {
         Value::Null => "NULL".into(),
         Value::String(s) => s.clone(),
