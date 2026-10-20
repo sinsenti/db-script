@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "fixture": "dbcli_cmp_*",
+  "successful": [
+    {"name":"current_database","request":{"op":"list_databases"}},
+    {"name":"tables","request":{"op":"list_tables","include_views":false}},
+    {"name":"tables_and_views","request":{"op":"list_tables","include_views":true}},
+    {"name":"people_schema","request":{"op":"schema","table":"dbcli_cmp_people"}},
+    {"name":"pairs_schema","request":{"op":"schema","table":"dbcli_cmp_pairs"}},
+    {"name":"edit_targets_schema","request":{"op":"schema","table":"dbcli_cmp_edit_targets"}},
+    {"name":"foreign_keys","request":{"op":"foreign_keys","table":"dbcli_cmp_pairs"}},
+    {"name":"count_all","request":{"op":"count","table":"dbcli_cmp_people"}},
+    {"name":"count_plain_filter","request":{"op":"count","table":"dbcli_cmp_people","filter":"O'Brien"}},
+    {"name":"count_expression_filter","request":{"op":"count","table":"dbcli_cmp_people","filter":"score >= 400 AND active = 1"}},
+    {"name":"page_values_blob_null_json","request":{"op":"page","table":"dbcli_cmp_people","limit":8,"offset":0,"sort":["id","ASC"]}},
+    {"name":"page_bound_filter","request":{"op":"page","table":"dbcli_cmp_people","limit":10,"offset":0,"filter":"O'Brien","sort":["id","ASC"]}},
+    {"name":"page_expression_filter","request":{"op":"page","table":"dbcli_cmp_people","limit":7,"offset":3,"filter":"score >= 400 AND active = 1","sort":["id","DESC"]}},
+    {"name":"page_composite","request":{"op":"page","table":"dbcli_cmp_pairs","limit":4,"offset":0,"filter":"order_id = 1","sort":["line_id","ASC"]}},
+    {"name":"page_without_primary_key","request":{"op":"page","table":"dbcli_cmp_loose","limit":10,"offset":0}},
+    {"name":"raw_bounded_bound_values","request":{"op":"raw","sql":"SELECT id, full_name, score FROM dbcli_cmp_people WHERE id >= ? ORDER BY id ASC","params":[2],"limit":5,"offset":1}}
+  ],
+  "mutations": [
+    {"name":"insert","request":{"op":"insert","table":"dbcli_cmp_people","row":{"id":50000,"full_name":"Inserted O'Neil 雪","city":"東京","note":"apostrophe: it's fine","profile_json":"{\"array\":[1,\"雪\"],\"ok\":true}","payload":{"$blob":"AP8="},"score":777,"active":1,"nullable":null,"created_at":"2025-03-08T00:00:00Z"}}},
+    {"name":"update_using_original_pk","request":{"op":"update","table":"dbcli_cmp_edit_targets","original":{"id":1},"updated":{"id":9001,"label":"updated from original key"}}},
+    {"name":"verify_key_change","request":{"op":"page","table":"dbcli_cmp_edit_targets","limit":2,"offset":0,"filter":"id = 9001","sort":["id","ASC"]}},
+    {"name":"update_composite_pk","request":{"op":"update","table":"dbcli_cmp_pairs","original":{"order_id":1,"line_id":1},"updated":{"quantity":99,"sku":"Updated 雪"}}},
+    {"name":"verify_composite_update","request":{"op":"page","table":"dbcli_cmp_pairs","limit":2,"offset":0,"filter":"order_id = 1","sort":["line_id","ASC"]}},
+    {"name":"delete_composite_pk","request":{"op":"delete","table":"dbcli_cmp_pairs","original":{"order_id":1,"line_id":1}}},
+    {"name":"delete_changed_pk","request":{"op":"delete","table":"dbcli_cmp_edit_targets","original":{"id":9001}}},
+    {"name":"delete_inserted_row","request":{"op":"delete","table":"dbcli_cmp_people","original":{"id":50000}}},
+    {"name":"verify_final_state","request":{"op":"count","table":"dbcli_cmp_edit_targets","filter":"id = 1 OR id = 9001"}}
+  ],
+  "rejections": [
+    {"name":"invalid_page_limit","read_only":false,"request":{"op":"page","table":"dbcli_cmp_people","limit":0,"offset":0}},
+    {"name":"negative_offset","read_only":false,"request":{"op":"page","table":"dbcli_cmp_people","limit":5,"offset":-1}},
+    {"name":"unknown_sort_column","read_only":false,"request":{"op":"page","table":"dbcli_cmp_people","limit":5,"offset":0,"sort":["no_such_column","ASC"]}},
+    {"name":"invalid_sort_direction","read_only":false,"request":{"op":"page","table":"dbcli_cmp_people","limit":5,"offset":0,"sort":["id","UP"]}},
+    {"name":"missing_composite_key","read_only":false,"request":{"op":"delete","table":"dbcli_cmp_pairs","original":{"order_id":1}}},
+    {"name":"no_primary_key","read_only":false,"request":{"op":"delete","table":"dbcli_cmp_loose","original":{"tag":"priority"}}},
+    {"name":"unknown_update_column","read_only":false,"request":{"op":"update","table":"dbcli_cmp_people","original":{"id":1},"updated":{"missing_column":2}}},
+    {"name":"read_only_insert","read_only":true,"request":{"op":"insert","table":"dbcli_cmp_people","row":{"id":50001,"full_name":"forbidden"}}},
+    {"name":"read_only_update","read_only":true,"request":{"op":"update","table":"dbcli_cmp_people","original":{"id":1},"updated":{"score":123}}},
+    {"name":"read_only_delete","read_only":true,"request":{"op":"delete","table":"dbcli_cmp_people","original":{"id":1}}},
+    {"name":"raw_delete","read_only":false,"request":{"op":"raw","sql":"DELETE FROM dbcli_cmp_loose","limit":5,"offset":0}},
+    {"name":"raw_insert_cte","read_only":false,"request":{"op":"raw","sql":"WITH x AS (SELECT 1) DELETE FROM dbcli_cmp_loose","limit":5,"offset":0}},
+    {"name":"raw_multiple_statements","read_only":false,"request":{"op":"raw","sql":"SELECT 1; DELETE FROM dbcli_cmp_loose","limit":5,"offset":0}}
+  ],
+  "benchmark": [
+    {"name":"startup_connection","request":{"op":"list_databases"}},
+    {"name":"table_discovery","request":{"op":"list_tables","include_views":true}},
+    {"name":"schema_discovery","request":{"op":"schema","table":"dbcli_cmp_people"}},
+    {"name":"page_sorted","request":{"op":"page","table":"dbcli_cmp_people","limit":50,"offset":64,"sort":["id","ASC"]}},
+    {"name":"page_plain_filter","request":{"op":"page","table":"dbcli_cmp_people","limit":50,"offset":0,"filter":"Person 05","sort":["id","ASC"]}},
+    {"name":"page_expression_filter","request":{"op":"page","table":"dbcli_cmp_people","limit":50,"offset":0,"filter":"score >= 500 AND active = 1","sort":["id","ASC"]}},
+    {"name":"count_filtered","request":{"op":"count","table":"dbcli_cmp_people","filter":"Person 05"}},
+    {"name":"raw_read","request":{"op":"raw","sql":"SELECT id, full_name, score FROM dbcli_cmp_people WHERE score >= ? ORDER BY id ASC","params":[900],"limit":50,"offset":10}},
+    {"name":"insert","request":{"op":"insert","table":"dbcli_cmp_people","row":{"id":50000,"full_name":"Bench O'Brien","score":777,"created_at":"2025-03-08T00:00:00Z"}}},
+    {"name":"update","request":{"op":"update","table":"dbcli_cmp_edit_targets","original":{"id":2},"updated":{"label":"remote benchmark update"}}},
+    {"name":"delete","request":{"op":"delete","table":"dbcli_cmp_edit_targets","original":{"id":3}}}
+  ]
+}

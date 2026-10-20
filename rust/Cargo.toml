@@ -1,0 +1,27 @@
+[package]
+name = "dbcli-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust SQLite browser and native remote parity adapters for db-script"
+license = "MIT"
+
+[[bin]]
+name = "dbcli-rust"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+crossterm = "0.29"
+mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust"] }
+postgres = "0.19.14"
+rusqlite = { version = "0.32", features = ["hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
