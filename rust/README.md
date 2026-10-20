@@ -1,4 +1,4 @@
-# Rust database browser — current SQLite and read-only PostgreSQL build
+# Rust database browser — current SQLite and writable PostgreSQL build
 
 Python remains the reference implementation. This branch's native Rust SQLite
 browser is **writable by default**. `--read-only` opens SQLite read-only and
@@ -6,8 +6,8 @@ rejects mutations. SQLite is now **bundled with FTS5**; a system SQLite developm
 package or linker bootstrap is not required.
 
 PostgreSQL now opens the same interactive browser with `--postgres`, using
-`DBCLI_POSTGRES_URL` from the environment. It is always server-enforced read-only.
-See [PostgreSQL browsing](POSTGRES_READONLY.md) for policy, codecs and protocol.
+`DBCLI_POSTGRES_URL` from the environment. It is writable by default; `--read-only` enforces server read-only sessions.
+See [Current PostgreSQL writes and safety](POSTGRES_WRITABLE.md) for policy, codecs and protocol.
 
 ## Current quickstart
 
@@ -33,7 +33,7 @@ complete scrollable preview and confirmation; removing an update entry never
 implies deletion. Complete original primary keys, immutable snapshots, strict
 BLOB decoding and JSON TEXT preservation protect writes. Native PostgreSQL/MySQL
 protocol adapters remain available. PostgreSQL interactive browsing is now available
-in forced read-only mode; MySQL interactive/Docker browsing remains unsupported.
+in writable or explicit read-only mode; MySQL interactive/Docker browsing remains unsupported.
 
 See **[WRITABLE_SQLITE.md](WRITABLE_SQLITE.md)** for authoritative current controls,
 bulk/protocol formats, exports, safety rules, validation and remaining limitations.

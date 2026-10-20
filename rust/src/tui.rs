@@ -63,10 +63,13 @@ fn size() -> (usize, usize) {
         .map(|(w, h)| (w as usize, h as usize))
         .unwrap_or((100, 24))
 }
+fn terminal_lines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
 fn draw(text: &str) -> io::Result<()> {
     let mut out = io::stdout();
     execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
-    write!(out, "{text}")?;
+    write!(out, "{}", terminal_lines(text))?;
     out.flush()
 }
 fn read_key() -> io::Result<KeyEvent> {
@@ -231,6 +234,9 @@ fn notice(_guard: &mut TerminalGuard, message: &str) -> io::Result<()> {
     Ok(())
 }
 fn value_text(v: &Value) -> String {
+    if crate::pg_read::json_envelope(v) {
+        return crate::pg_read::json_payload(v).to_string();
+    }
     if let Some(text) = crate::pg_read::scalar_text(v) {
         return text.into();
     }
@@ -249,6 +255,26 @@ fn row_map(headers: &[String], row: &[Value]) -> Map<String, Value> {
         .zip(row)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+fn confirm_pg(
+    adapter: &SQLiteAdapter,
+    guard: &mut TerminalGuard,
+    actions: &[Value],
+) -> Result<bool, DbError> {
+    if !adapter.is_postgres() {
+        return Ok(true);
+    }
+    pager(
+        guard,
+        &format!(
+            "PostgreSQL transaction preview\n{}",
+            serde_json::to_string_pretty(actions).unwrap()
+        ),
+    )
+    .map_err(|e| DbError::adapter(e.to_string()))?;
+    Ok(prompt(guard, "Apply transaction? y/N: ", "")
+        .map_err(|e| DbError::adapter(e.to_string()))?
+        == "y")
 }
 fn json_roundtrip_for_edit(
     original: &Map<String, Value>,
@@ -935,7 +961,15 @@ fn browse_with_filter(
                                 if let Some(updated) = v.as_object() {
                                     let updated =
                                         json_roundtrip_for_edit(&original, updated.clone());
-                                    adapter.update_row(table, &original, &updated)?;
+                                    if confirm_pg(
+                                        adapter,
+                                        guard,
+                                        &[
+                                            serde_json::json!({"kind":"update","original":original,"row":updated}),
+                                        ],
+                                    )? {
+                                        adapter.update_row(table, &original, &updated)?;
+                                    }
                                     break;
                                 }
                             }
@@ -964,8 +998,8 @@ fn browse_with_filter(
                 }
             }
             KeyCode::Char('a') if !adapter.is_read_only() && raw.is_none() => {
-                let template = current
-                    .headers
+                let insert_columns = adapter.insert_columns(table)?;
+                let template = insert_columns
                     .iter()
                     .map(|h| (h.clone(), Value::Null))
                     .collect::<Map<_, _>>();
@@ -981,7 +1015,9 @@ fn browse_with_filter(
                         .into_iter()
                         .map(|row| serde_json::json!({"kind":"insert","row":row}))
                         .collect::<Vec<_>>();
-                    adapter.apply_batch(table, &actions)?;
+                    if confirm_pg(adapter, guard, &actions)? {
+                        adapter.apply_batch(table, &actions)?;
+                    }
                 }
             }
             KeyCode::Char('E') if !adapter.is_read_only() && raw.is_none() => {
@@ -1001,11 +1037,16 @@ fn browse_with_filter(
                         edit_json(Value::Object(original.clone()), guard)
                             .map_err(|e| DbError::adapter(e.to_string()))?
                     {
-                        adapter.update_row(
-                            table,
-                            &original,
-                            &json_roundtrip_for_edit(&original, updated),
-                        )?;
+                        let updated = json_roundtrip_for_edit(&original, updated);
+                        if confirm_pg(
+                            adapter,
+                            guard,
+                            &[
+                                serde_json::json!({"kind":"update","original":original,"row":updated}),
+                            ],
+                        )? {
+                            adapter.update_row(table, &original, &updated)?;
+                        }
                     }
                 }
             }
@@ -1272,11 +1313,14 @@ fn export(
                         .iter()
                         .zip(r)
                         .map(|(h, v)| {
-                            let decoded = v
-                                .as_str()
-                                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                                .filter(|v| v.is_object() || v.is_array())
-                                .unwrap_or_else(|| v.clone());
+                            let decoded = if postgres {
+                                crate::pg_read::json_payload(v).clone()
+                            } else {
+                                v.as_str()
+                                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                                    .filter(|v| v.is_object() || v.is_array())
+                                    .unwrap_or_else(|| v.clone())
+                            };
                             (h.clone(), decoded)
                         })
                         .collect()
@@ -1440,6 +1484,10 @@ pub fn select_database() -> Result<Option<PathBuf>, DbError> {
 mod writable_ui_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn raw_terminal_lines_reset_columns_once() {
+        assert_eq!(terminal_lines("a\nb\r\nc"), "a\r\nb\r\nc");
+    }
     #[test]
     fn editor_files_are_private_and_removed() {
         let temporary = TempJson::create(&serde_json::json!({"only":"synthetic"})).unwrap();

@@ -94,7 +94,7 @@ impl RemoteAdapter {
 
     pub fn protocol(&self, request: ProtocolRequest) -> Value {
         if self.engine == RemoteEngine::Postgres {
-            return crate::SQLiteAdapter::postgres().protocol(request);
+            return crate::SQLiteAdapter::postgres(self.read_only).protocol(request);
         }
         let mut trace = Vec::new();
         let result = self.run(request, &mut trace);

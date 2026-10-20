@@ -70,16 +70,18 @@ impl SQLiteAdapter {
             trace: Rc::new(RefCell::new(Vec::new())),
         }
     }
-    pub fn postgres() -> Self {
-        let mut a = Self::new("PostgreSQL", true);
+    pub fn postgres(read_only: bool) -> Self {
+        let mut a = Self::new("PostgreSQL", read_only);
         a.postgres = true;
         a
     }
     pub fn is_postgres(&self) -> bool {
         self.postgres
     }
-    fn pg<T: serde::de::DeserializeOwned>(&self, op: Value) -> Result<T, DbError> {
+    fn pg<T: serde::de::DeserializeOwned>(&self, mut op: Value) -> Result<T, DbError> {
+        op["json_envelopes"] = json!(true);
         let v = pg_read::Reader::new(pg_read::BlobStyle::Base64)
+            .with_read_only(self.read_only)
             .operation(&op)
             .map_err(|e| DbError::new(e.kind, e.message))?;
         serde_json::from_value(v).map_err(|_| DbError::adapter("PostgreSQL result shape mismatch"))
@@ -307,6 +309,13 @@ impl SQLiteAdapter {
         }
         Ok(keys)
     }
+    pub fn insert_columns(&self, table: &str) -> Result<Vec<String>, DbError> {
+        if self.postgres {
+            self.pg(json!({"op":"insert_columns","table":table}))
+        } else {
+            self.columns_conn(&self.connect()?, table)
+        }
+    }
     pub fn primary_keys(&self, table: &str) -> Result<Vec<String>, DbError> {
         if self.postgres {
             return self.pg(json!({"op":"primary_keys","table":table}));
@@ -316,6 +325,9 @@ impl SQLiteAdapter {
     }
     pub fn apply_batch(&self, table: &str, actions: &[Value]) -> Result<usize, DbError> {
         self.validate_write()?;
+        if self.postgres {
+            return self.pg(json!({"op":"apply_batch","table":table,"actions":actions}));
+        }
         writable::apply(&mut self.connect()?, table, actions, |v| {
             value_to_sql(&normalize_json_value(v)).map_err(|e| e.to_string())
         })
@@ -384,6 +396,9 @@ impl SQLiteAdapter {
     }
     fn single_write(&self, table: &str, action: Value) -> Result<usize, DbError> {
         self.validate_write()?;
+        if self.postgres {
+            return self.pg(json!({"op":"apply_batch","table":table,"actions":[action]}));
+        }
         writable::apply_single(&mut self.connect()?, table, action, |v| {
             value_to_sql(&normalize_json_value(v)).map_err(|e| e.to_string())
         })
@@ -1134,6 +1149,7 @@ impl SQLiteAdapter {
     pub fn protocol(&self, req: ProtocolRequest) -> Value {
         if self.postgres {
             return match pg_read::Reader::new(pg_read::BlobStyle::Base64)
+                .with_read_only(self.read_only)
                 .operation(&serde_json::to_value(&req).unwrap())
             {
                 Ok(v) => json!({"ok":true,"result":v,"trace":[]}),

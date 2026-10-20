@@ -4,6 +4,9 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 fn cell_text(value: &Value) -> String {
+    if crate::pg_read::json_envelope(value) {
+        return crate::pg_read::json_payload(value).to_string();
+    }
     if let Some(text) = crate::pg_read::scalar_text(value) {
         return text.into();
     }

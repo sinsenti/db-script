@@ -1,3 +1,6 @@
+> Historical read-only phase notes. The current PostgreSQL browser is writable by default.
+> See [POSTGRES_WRITABLE.md](POSTGRES_WRITABLE.md) for authoritative current policy, commands and validation.
+
 # PostgreSQL read-only interactive browser
 
 ## Run

@@ -1,5 +1,7 @@
 //! Native PostgreSQL read adapter shared by the interactive and protocol paths.
 //! No connection strings are accepted in commands or formatted into diagnostics.
+#[path = "pg_write.rs"]
+mod write;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::{
@@ -45,19 +47,36 @@ pub enum BlobStyle {
 #[derive(Clone)]
 pub struct Reader {
     pub blob: BlobStyle,
+    pub read_only: bool,
 }
 impl Reader {
     pub fn new(blob: BlobStyle) -> Self {
-        Self { blob }
+        Self {
+            blob,
+            read_only: false,
+        }
+    }
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
     fn connect(&self) -> Result<Client> {
+        self.connect_mode(true)
+    }
+    fn connect_mode(&self, read_only: bool) -> Result<Client> {
         let url = std::env::var("DBCLI_POSTGRES_URL")
             .or_else(|_| std::env::var("DBCLI_BENCH_POSTGRES_URL"))
             .or_else(|_| std::env::var("DBCLI_BENCH_DATABASE_URL"))
             .map_err(|_| error("AdapterError", "DBCLI_POSTGRES_URL is required"))?;
-        let config = configuration(&url)?;
+        let config = configuration_mode(&url, read_only)?;
         let mut client = config.connect(NoTls).map_err(db)?;
-        client.batch_execute("BEGIN READ ONLY").map_err(db)?;
+        client
+            .batch_execute(if read_only {
+                "BEGIN READ ONLY"
+            } else {
+                "BEGIN READ WRITE"
+            })
+            .map_err(db)?;
         let row=client.query_one("SELECT current_setting('transaction_read_only'),current_setting('default_transaction_read_only'),current_setting('statement_timeout'),current_setting('lock_timeout'),current_setting('TimeZone')",&[]).map_err(db)?;
         let settings = (
             row.get::<_, String>(0),
@@ -66,8 +85,8 @@ impl Reader {
             row.get::<_, String>(3),
             row.get::<_, String>(4),
         );
-        if settings.0 != "on"
-            || settings.1 != "on"
+        if settings.0 != if read_only { "on" } else { "off" }
+            || settings.1 != if read_only { "on" } else { "off" }
             || milliseconds(&settings.2).is_none_or(|n| n == 0 || n > 3000)
             || milliseconds(&settings.3).is_none_or(|n| n == 0 || n > 1000)
             || settings.4 != "UTC"
@@ -192,7 +211,7 @@ impl Reader {
                         output.push(sql_literal(v)?)
                     }
                     if ty.is_some_and(|t| *t == Type::JSON || *t == Type::JSONB) {
-                        walk(&mut output, &quote(h)?, v, 0)
+                        walk(&mut output, &quote(h)?, json_payload(v), 0)
                     }
                 }
             }
@@ -204,6 +223,7 @@ impl Reader {
     }
     pub fn operation(&self, op: &Value) -> Result<Value> {
         let name = op["op"].as_str().unwrap_or("");
+        let table = op["table"].as_str().unwrap_or("items");
         if [
             "insert",
             "update",
@@ -216,12 +236,30 @@ impl Reader {
         ]
         .contains(&name)
         {
-            return Err(error(
-                "ReadOnlyError",
-                "PostgreSQL browsing is always read-only",
-            ));
+            let actions = if name == "apply_batch" || name == "bulk" {
+                op["actions"]
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| error("ValueError", "actions must be an array"))?
+            } else {
+                let kind = name.trim_end_matches("_row");
+                vec![
+                    json!({"kind":kind,"row":op.get("row").filter(|v|!v.is_null()).or_else(||op.get("updated")).cloned().unwrap_or_else(||json!({})),"original":op.get("original").cloned().unwrap_or(Value::Null)}),
+                ]
+            };
+            return Ok(json!(write::apply(self, table, &actions)?));
         }
-        let mut c = self.connect()?;
+        let mut c = self.connect_mode(true)?;
+        let query = |c: &mut Client, sql: &str, params: &[Value], blob, window| {
+            query_mode(
+                c,
+                sql,
+                params,
+                blob,
+                window,
+                op["json_envelopes"].as_bool().unwrap_or(false),
+            )
+        };
         let table = op["table"].as_str().unwrap_or("items");
         let limit = integer(op, "limit", 50)?;
         let offset = integer(op, "offset", 0)?;
@@ -241,6 +279,18 @@ impl Reader {
             .or_else(|| op.get("sort"))
             .filter(|v| !v.is_null());
         match name {
+            "write_columns" | "insert_columns" => {
+                let cols = write::columns(&mut c, table)?;
+                if name == "insert_columns" {
+                    Ok(json!(cols
+                        .into_iter()
+                        .filter(|c| !c.generated && !c.default && c.identity.is_empty())
+                        .map(|c| c.name)
+                        .collect::<Vec<_>>()))
+                } else {
+                    Ok(json!(cols.iter().map(|c|json!({"name":c.name,"generated":c.generated,"identity":c.identity,"has_default":c.default})).collect::<Vec<_>>()))
+                }
+            }
             "version" => query(
                 &mut c,
                 "SELECT current_setting('server_version') AS version",
@@ -420,6 +470,9 @@ impl Reader {
     }
 }
 fn configuration(url: &str) -> Result<Config> {
+    configuration_mode(url, true)
+}
+fn configuration_mode(url: &str, read_only: bool) -> Result<Config> {
     let mut config = Config::from_str(url).map_err(|_| {
         error(
             "AdapterError",
@@ -429,7 +482,7 @@ fn configuration(url: &str) -> Result<Config> {
     let previous = config.get_options().unwrap_or("").to_string();
     let statement = timeout_option(&previous, "statement_timeout", 3000);
     let lock = timeout_option(&previous, "lock_timeout", 1000);
-    config.options(&format!("{previous} -c default_transaction_read_only=on -c statement_timeout={statement} -c lock_timeout={lock} -c TimeZone=UTC"));
+    config.options(&format!("{previous} -c default_transaction_read_only={} -c statement_timeout={statement} -c lock_timeout={lock} -c TimeZone=UTC",if read_only{"on"}else{"off"}));
     let connect = config
         .get_connect_timeout()
         .copied()
@@ -610,6 +663,16 @@ fn query(
     blob: BlobStyle,
     window: Option<(i64, i64)>,
 ) -> Result<Value> {
+    query_mode(c, sql, params, blob, window, false)
+}
+fn query_mode(
+    c: &mut Client,
+    sql: &str,
+    params: &[Value],
+    blob: BlobStyle,
+    window: Option<(i64, i64)>,
+    json_envelopes: bool,
+) -> Result<Value> {
     let ps = params.iter().cloned().map(Param).collect::<Vec<_>>();
     let types = ps.iter().map(Param::hint).collect::<Vec<_>>();
     let st = c.prepare_typed(sql, &types).map_err(db)?;
@@ -632,7 +695,14 @@ fn query(
                 let cell = row
                     .try_get::<_, Option<Cell>>(i)
                     .map_err(db)?
-                    .map(|c| wire_blob(c.0, blob, row.columns()[i].type_()))
+                    .map(|c| {
+                        let ty = row.columns()[i].type_();
+                        if json_envelopes {
+                            ui_json(c.0, blob, ty)
+                        } else {
+                            wire_blob(c.0, blob, ty)
+                        }
+                    })
                     .unwrap_or(Value::Null);
                 cells.push(cell)
             }
@@ -644,6 +714,32 @@ fn query(
         index += 1;
     }
     Ok(json!({"headers":headers,"rows":rows}))
+}
+fn ui_json(v: Value, blob: BlobStyle, t: &Type) -> Value {
+    if let Kind::Domain(base) = t.kind() {
+        return ui_json(v, blob, base);
+    }
+    if json_type(t) {
+        return json!({"$type":"json","value":json_payload(&v)});
+    }
+    if let Kind::Array(element) = t.kind() {
+        if json_type(element) {
+            return Value::Array(
+                v.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| {
+                        if v.is_null() {
+                            Value::Null
+                        } else {
+                            json!({"$type":"json","value":json_payload(v)})
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
+    wire_blob(v, blob, t)
 }
 fn wire_blob(v: Value, style: BlobStyle, ty: &Type) -> Value {
     match ty.kind() {
@@ -832,12 +928,12 @@ fn decode(t: &Type, raw: &[u8]) -> std::result::Result<Value, Box<dyn StdError +
                 )
             }
         }
-        Type::JSON => serde_json::from_slice(raw)?,
+        Type::JSON => json_read(serde_json::from_slice(raw)?),
         Type::JSONB => {
             if raw.first() != Some(&1) {
                 return Err("Unknown JSONB binary format".into());
             }
-            serde_json::from_slice(&raw[1..])?
+            json_read(serde_json::from_slice(&raw[1..])?)
         }
         Type::TEXT
         | Type::VARCHAR
@@ -1036,12 +1132,25 @@ impl ToSql for Param {
         if let Kind::Domain(base) = t.kind() {
             return self.to_sql(base, out);
         }
-        let v = if self
-            .0
-            .get("$type")
-            .and_then(Value::as_str)
-            .is_some_and(|s| ["uuid", "decimal", "date", "time", "datetime"].contains(&s))
-        {
+        if *t == Type::JSON || *t == Type::JSONB {
+            let json = json_payload(&self.0);
+            if *t == Type::JSONB {
+                out.extend_from_slice(&[1]);
+            }
+            out.extend_from_slice(&serde_json::to_vec(json)?);
+            return Ok(IsNull::No);
+        }
+        let tag = self.0.get("$type").and_then(Value::as_str);
+        let expected = match *t {
+            Type::UUID => Some("uuid"),
+            Type::NUMERIC => Some("decimal"),
+            Type::FLOAT4 | Type::FLOAT8 => Some("float"),
+            Type::DATE => Some("date"),
+            Type::TIME | Type::TIMETZ => Some("time"),
+            Type::TIMESTAMP | Type::TIMESTAMPTZ => Some("datetime"),
+            _ => None,
+        };
+        let v = if expected.is_some() && tag == expected {
             &self.0["value"]
         } else {
             &self.0
@@ -1117,6 +1226,14 @@ impl ToSql for Param {
                     .signed_duration_since(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap())
                     .num_days();
                 out.extend_from_slice(&i32::try_from(days)?.to_be_bytes())
+            }
+            Type::TIMETZ => {
+                let text = as_text();
+                let time = chrono::DateTime::parse_from_rfc3339(&format!("2000-01-01T{text}"))?;
+                let micros = time.time().num_seconds_from_midnight() as i64 * 1_000_000
+                    + time.time().nanosecond() as i64 / 1000;
+                out.extend_from_slice(&micros.to_be_bytes());
+                out.extend_from_slice(&(-time.offset().local_minus_utc()).to_be_bytes());
             }
             Type::TIME => {
                 let time = NaiveTime::parse_from_str(&as_text(), "%H:%M:%S%.f")?;
@@ -1259,7 +1376,13 @@ fn encode_array(
     }
     let mut dims = vec![];
     let mut flat = vec![];
-    shape(value, &mut dims, 0, &mut flat)?;
+    if json_type(element) {
+        let values = value.as_array().ok_or("array parameter needs an array")?;
+        dims.push(values.len());
+        flat = values.clone();
+    } else {
+        shape(value, &mut dims, 0, &mut flat)?;
+    }
     if dims.first() == Some(&0) {
         dims.clear()
     }
@@ -1550,6 +1673,34 @@ fn shift_parameters(sql: &str, shift: usize) -> String {
     out
 }
 
+fn json_type(t: &Type) -> bool {
+    match t.kind() {
+        Kind::Domain(base) => json_type(base),
+        _ => *t == Type::JSON || *t == Type::JSONB,
+    }
+}
+pub fn json_payload(v: &Value) -> &Value {
+    if v.as_object().is_some_and(|o| {
+        o.len() == 2
+            && o.get("$type").and_then(Value::as_str) == Some("json")
+            && o.contains_key("value")
+    }) {
+        &v["value"]
+    } else {
+        v
+    }
+}
+pub fn json_read(v: Value) -> Value {
+    if v.is_null() || !std::ptr::eq(json_payload(&v), &v) {
+        json!({"$type":"json","value":v})
+    } else {
+        v
+    }
+}
+pub fn json_envelope(v: &Value) -> bool {
+    !std::ptr::eq(json_payload(v), v)
+}
+
 pub fn scalar_text(v: &Value) -> Option<&str> {
     let t = v.get("$type")?.as_str()?;
     if ["uuid", "decimal", "date", "time", "datetime", "float"].contains(&t) {
@@ -1559,6 +1710,12 @@ pub fn scalar_text(v: &Value) -> Option<&str> {
     }
 }
 pub fn sql_literal(v: &Value) -> Result<String> {
+    if json_envelope(v) {
+        return Ok(format!(
+            "'{}'::jsonb",
+            json_payload(v).to_string().replace('\'', "''")
+        ));
+    }
     if v.is_null() {
         return Ok("NULL".into());
     }
@@ -1640,12 +1797,12 @@ fn sql_typed_literal(v: &Value, t: &Type) -> Result<String> {
         return sql_typed_literal(v, base);
     }
     if let Kind::Array(element) = t.kind() {
-        fn array_text(v: &Value, element: &Type) -> Result<String> {
-            if let Some(a) = v.as_array() {
+        fn array_text(v: &Value, element: &Type, root: bool) -> Result<String> {
+            if let Some(a) = v.as_array().filter(|_| root || !json_type(element)) {
                 return Ok(format!(
                     "{{{}}}",
                     a.iter()
-                        .map(|v| array_text(v, element))
+                        .map(|v| array_text(v, element, false))
                         .collect::<Result<Vec<_>>>()?
                         .join(",")
                 ));
@@ -1672,7 +1829,7 @@ fn sql_typed_literal(v: &Value, t: &Type) -> Result<String> {
                     bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
                 )
             } else if *element == Type::JSON || *element == Type::JSONB {
-                v.to_string()
+                json_payload(v).to_string()
             } else {
                 scalar_text(v)
                     .or_else(|| v.as_str())
@@ -1684,7 +1841,7 @@ fn sql_typed_literal(v: &Value, t: &Type) -> Result<String> {
                 text.replace('\\', "\\\\").replace('\"', "\\\"")
             ))
         }
-        let text = array_text(v, element)?;
+        let text = array_text(v, element, true)?;
         return Ok(format!(
             "'{}'::{}.{}",
             text.replace('\'', "''"),
@@ -1695,7 +1852,7 @@ fn sql_typed_literal(v: &Value, t: &Type) -> Result<String> {
     if *t == Type::JSON || *t == Type::JSONB {
         return Ok(format!(
             "'{}'::{}",
-            v.to_string().replace('\'', "''"),
+            json_payload(v).to_string().replace('\'', "''"),
             t.name()
         ));
     }
@@ -1794,7 +1951,8 @@ mod tests {
     fn mutation_rejected_without_connection() {
         assert_eq!(
             Reader::new(BlobStyle::Hex)
-                .operation(&json!({"op":"insert"}))
+                .with_read_only(true)
+                .operation(&json!({"op":"insert","row":{}}))
                 .unwrap_err()
                 .kind,
             "ReadOnlyError"
