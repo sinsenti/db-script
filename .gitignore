@@ -219,3 +219,6 @@ __marimo__/
 
 # Private disposable writable-parity copies
 /.local/
+
+# Local nested Git worktrees
+/.claude/worktrees/

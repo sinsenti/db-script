@@ -39,6 +39,8 @@ pub struct Page {
 pub struct Meta {
     pub postgres: bool,
     pub insert_omit: std::collections::HashSet<String>,
+    pub generated: std::collections::HashSet<String>,
+    pub identity_always: std::collections::HashSet<String>,
     pub schema: Page,
     pub keys: Vec<String>,
     pub types: HashMap<String, String>,
@@ -309,7 +311,16 @@ fn metadata(
         for row in native_types.rows {
             m.types.insert(text(&row[0]), text(&row[1]));
         }
-        let defaults=raw(w,"SELECT attname FROM pg_catalog.pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped AND (attgenerated<>'' OR attidentity<>'' OR atthasdef) ORDER BY attnum",vec![json!(reference)],100000,0)?;
+        let defaults=raw(w,"SELECT attname,attgenerated::text,attidentity::text FROM pg_catalog.pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped AND (attgenerated<>'' OR attidentity<>'' OR atthasdef) ORDER BY attnum",vec![json!(reference)],100000,0)?;
+        for row in &defaults.rows {
+            let name = row[0].as_str().ok_or("Invalid column metadata")?;
+            if row[1].as_str().is_some_and(|value| !value.is_empty()) {
+                m.generated.insert(name.to_string());
+            }
+            if row[2].as_str() == Some("a") {
+                m.identity_always.insert(name.to_string());
+            }
+        }
         m.insert_omit = defaults
             .rows
             .iter()
@@ -934,19 +945,40 @@ pub fn export(
         }
         "sql" => {
             let target = table_ref(engine, table)?;
-            let cols = p
+            let indices = p
                 .headers
                 .iter()
-                .map(|h| quote(h))
+                .enumerate()
+                .filter(|(_, h)| engine != "postgres" || !m.generated.contains(*h))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let cols = indices
+                .iter()
+                .map(|&index| quote(&p.headers[index]))
                 .collect::<Result<Vec<_>>>()?
                 .join(", ");
+            let overriding = if engine == "postgres"
+                && indices
+                    .iter()
+                    .any(|&index| m.identity_always.contains(&p.headers[index]))
+            {
+                " OVERRIDING SYSTEM VALUE"
+            } else {
+                ""
+            };
             let mut out = String::new();
             for (row_index, r) in p.rows.iter().enumerate() {
-                let values = p
-                    .headers
+                if r.len() != p.headers.len() {
+                    return Err("Export row width mismatch".into());
+                }
+                if indices.is_empty() {
+                    out += &format!("INSERT INTO {target} DEFAULT VALUES;\n");
+                    continue;
+                }
+                let values = indices
                     .iter()
-                    .zip(r)
-                    .map(|(h, v)| {
+                    .map(|&index| {
+                        let (h, v) = (&p.headers[index], &r[index]);
                         let typ = m.types.get(h).map(String::as_str).unwrap_or("");
                         if v.is_null()
                             && engine == "postgres"
@@ -962,7 +994,7 @@ pub fn export(
                     })
                     .collect::<Result<Vec<_>>>()?
                     .join(", ");
-                out += &format!("INSERT INTO {target} ({cols}) VALUES ({values});\n");
+                out += &format!("INSERT INTO {target} ({cols}){overriding} VALUES ({values});\n");
             }
             std::fs::write(path, out).map_err(|_| "Could not write SQL export".into())
         }
@@ -1019,6 +1051,62 @@ pub fn sql_literal(v: &Value, engine: &str, typ: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn postgres_sql_export_generated_identity_and_defaults() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("rows.sql");
+        let mut m = Meta::default();
+        m.generated.insert("computed".into());
+        m.identity_always.insert("id".into());
+        let p = Page {
+            headers: vec!["computed".into(), "id".into(), "label".into()],
+            rows: vec![vec![json!(6), json!(42), json!("it's fine")]],
+            ..Page::default()
+        };
+        export(&path, "sql", "postgres", "public.items", &p, &m).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),
+            "INSERT INTO \"public\".\"items\" (\"id\", \"label\") OVERRIDING SYSTEM VALUE VALUES (42, 'it''s fine');\n");
+        // JSON/CSV retain all projected columns, including computed ones.
+        export(&path, "json", "postgres", "public.items", &p, &m).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("computed"));
+        let generated_only = Page {
+            headers: vec!["computed".into()],
+            rows: vec![vec![json!(6)], vec![json!(8)]],
+            ..Page::default()
+        };
+        export(
+            &path,
+            "sql",
+            "postgres",
+            "public.items",
+            &generated_only,
+            &m,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),
+            "INSERT INTO \"public\".\"items\" DEFAULT VALUES;\nINSERT INTO \"public\".\"items\" DEFAULT VALUES;\n");
+        let without_id = Page {
+            headers: vec!["label".into()],
+            rows: vec![vec![json!("text")]],
+            ..Page::default()
+        };
+        export(&path, "sql", "postgres", "public.items", &without_id, &m).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("OVERRIDING"));
+        let by_default = Meta::default();
+        export(&path, "sql", "postgres", "public.items", &p, &by_default).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("OVERRIDING"));
+        let malformed = Page {
+            headers: vec!["id".into()],
+            rows: vec![vec![]],
+            ..Page::default()
+        };
+        assert!(export(&path, "sql", "postgres", "public.items", &malformed, &m).is_err());
+    }
+
     #[test]
     fn complete_composite_identity_and_atomic_plan() {
         let m = Meta {

@@ -14,3 +14,10 @@ Preserve terminal restoration, child reaping, 0700/0600 temporary storage and cl
 Run cargo test --locked --manifest-path rust/Cargo.toml and the Python offline suite.
 Real PTY/mutation checks must use disposable fixtures; never use the application DB.
 See ../RUST.md and POSTGRES_WRITABLE.md for authoritative commands and limitations.
+
+PostgreSQL SQL exports omit generated columns, override ALWAYS identity values,
+and use DEFAULT VALUES when the projected insertable column list is empty.
+Keep these semantics aligned with ui/rust/src/data.rs. New live replay tests in
+both Rust crates validate a marked disposable fixture via tests/support only.
+Standalone performance tooling lives in ../benchmarks/quotes_perf and resolves
+main-local paths; it must remain outside the production runtime dependency graph.

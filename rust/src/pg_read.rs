@@ -132,28 +132,14 @@ impl Reader {
                     .clone(),
             )
         }
-        let names = headers
-            .iter()
-            .map(|h| quote(h))
-            .collect::<Result<Vec<_>>>()?
-            .join(", ");
-        let mut output = String::new();
-        for row in rows {
-            if row.len() != types.len() {
-                return Err(error("ValueError", "Export row width mismatch"));
-            }
-            let values = row
-                .iter()
-                .zip(&types)
-                .map(|(v, t)| sql_typed_literal(v, t))
-                .collect::<Result<Vec<_>>>()?
-                .join(", ");
-            output.push_str(&format!(
-                "INSERT INTO {target} ({names}) VALUES ({values});\n"
-            ));
-        }
-        Ok(output)
+        let attributes = if raw.is_none() {
+            write::columns(&mut c, table)?
+        } else {
+            vec![]
+        };
+        render_sql_export(&target, headers, rows, &types, &attributes)
     }
+
     pub fn completions(
         &self,
         table: &str,
@@ -1789,6 +1775,62 @@ pub fn sql_literal(v: &Value) -> Result<String> {
     Ok(format!("'{}'", s.replace('\'', "''")))
 }
 
+// Raw query exports target query_result and have no destination-table attributes.
+fn render_sql_export(
+    target: &str,
+    headers: &[String],
+    rows: &[Vec<Value>],
+    types: &[Type],
+    attributes: &[write::Column],
+) -> Result<String> {
+    if headers.len() != types.len() {
+        return Err(error("ValueError", "Export type width mismatch"));
+    }
+    let included = headers
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            !attributes
+                .iter()
+                .any(|column| &column.name == *name && column.generated)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let names = included
+        .iter()
+        .map(|&index| quote(&headers[index]))
+        .collect::<Result<Vec<_>>>()?
+        .join(", ");
+    let overriding = if included.iter().any(|&index| {
+        attributes
+            .iter()
+            .any(|column| column.name == headers[index] && column.identity == "a")
+    }) {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+    let mut output = String::new();
+    for row in rows {
+        if row.len() != headers.len() {
+            return Err(error("ValueError", "Export row width mismatch"));
+        }
+        if included.is_empty() {
+            output.push_str(&format!("INSERT INTO {target} DEFAULT VALUES;\n"));
+            continue;
+        }
+        let values = included
+            .iter()
+            .map(|&index| sql_typed_literal(&row[index], &types[index]))
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
+        output.push_str(&format!(
+            "INSERT INTO {target} ({names}){overriding} VALUES ({values});\n"
+        ));
+    }
+    Ok(output)
+}
+
 fn sql_typed_literal(v: &Value, t: &Type) -> Result<String> {
     if v.is_null() {
         return Ok("NULL".into());
@@ -1861,6 +1903,46 @@ fn sql_typed_literal(v: &Value, t: &Type) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sql_export_omits_generated_and_overrides_only_always_identity() {
+        let headers = vec!["computed".into(), "id".into(), "label".into()];
+        let rows = vec![vec![json!(6), json!(42), json!("it's fine")]];
+        let types = vec![Type::INT4, Type::INT4, Type::TEXT];
+        let attributes = vec![
+            write::Column {
+                name: "computed".into(),
+                ty: Type::INT4,
+                generated: true,
+                identity: String::new(),
+                default: false,
+            },
+            write::Column {
+                name: "id".into(),
+                ty: Type::INT4,
+                generated: false,
+                identity: "a".into(),
+                default: true,
+            },
+        ];
+        let output =
+            render_sql_export("\"public\".\"items\"", &headers, &rows, &types, &attributes)
+                .unwrap();
+        assert_eq!(output,"INSERT INTO \"public\".\"items\" (\"id\", \"label\") OVERRIDING SYSTEM VALUE VALUES (42, 'it''s fine');\n");
+        let output = render_sql_export("\"query_result\"", &headers, &rows, &types, &[]).unwrap();
+        assert!(output.contains("computed"));
+        assert!(!output.contains("OVERRIDING"));
+        let output = render_sql_export(
+            "items",
+            &["computed".into()],
+            &[vec![json!(6)]],
+            &[Type::INT4],
+            &attributes,
+        )
+        .unwrap();
+        assert_eq!(output, "INSERT INTO items DEFAULT VALUES;\n");
+        assert!(render_sql_export("items", &headers, &[vec![]], &types, &attributes).is_err());
+    }
+
     #[test]
     fn exact_numeric_codec() {
         for s in [

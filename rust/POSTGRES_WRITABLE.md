@@ -94,3 +94,12 @@ python3 rust/tests/postgres_write.py --fixture /private/disposable/fixture.json 
 
 No application database is mutated during tests. Historical benchmark/read-only
 results describe previous artifacts and are retained separately.
+
+## SQL export replay
+
+Both Rust interfaces omit computed columns from SQL INSERT exports and use
+`OVERRIDING SYSTEM VALUE` when exporting ALWAYS identity values. BY DEFAULT
+identities retain their explicit values with ordinary INSERT. All-generated
+projections use DEFAULT VALUES per row. JSON/CSV projections are unchanged.
+Table definitions and identity-sequence resets are not included. See the root
+[Rust guide](../RUST.md) for disposable export replay checks.

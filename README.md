@@ -24,3 +24,8 @@ python -m unittest discover -s tests -q
 
 Optional native-adapter integration tests use the disposable Docker fixtures
 in `tests/docker-compose.yml`; see `tests/test_integration_adapters.py`.
+
+## Agent context
+
+See [AGENTS.md](AGENTS.md) for project architecture, development commands,
+safety constraints and known implementation gaps.

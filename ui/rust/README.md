@@ -256,3 +256,12 @@ Both diff files carry a complete explicit plan, including full immutable origina
 snapshots and editable rows. This costs more payload/memory than a compact-PK
 editor plan; no payload optimization is claimed in this phase. Source snapshots
 also remain in memory for validation. Private row data is not logged.
+
+### PostgreSQL SQL replay
+
+SQL INSERT exports omit computed/generated columns. Exported ALWAYS identity
+values use `OVERRIDING SYSTEM VALUE`; BY DEFAULT identities use ordinary INSERT.
+An export with no insertable projected columns uses one `DEFAULT VALUES` statement
+per row. JSON/CSV continue to include generated columns. Exports do not create the
+destination table or reset identity sequences. See [RUST.md](../../RUST.md) for
+opt-in disposable replay tests and the standalone performance-tool commands.
