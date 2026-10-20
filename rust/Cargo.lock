@@ -286,6 +286,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crossterm",
+ "libc",
  "mysql",
  "postgres",
  "rusqlite",

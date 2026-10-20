@@ -1329,3 +1329,5 @@ fn ensure_single(sql: &str) -> Result<(), DbError> {
     }
     Ok(())
 }
+
+pub mod bulk_editor;

@@ -33,7 +33,7 @@ def main():
         else:command+=['--database='+str(database),'--table','tasks']
         master,slave=pty.openpty();saved=termios.tcgetattr(slave)
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',28,120,0,0))
-        env=os.environ.copy();env.update(TERM='xterm-256color',EDITOR='python3 '+str(editor),DBCLI_PTY_CONTROL=str(control))
+        env=os.environ.copy();env.update(TERM='xterm-256color',EDITOR='python3 '+str(editor),DBCLI_BULK_EDITOR='python3 '+str(editor),DBCLI_PTY_CONTROL=str(control))
         process=subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,cwd=folder,env=env)
         captured=bytearray()
         def drain(seconds=.15):
@@ -63,7 +63,7 @@ def main():
             assert data("SELECT typeof(payload),typeof(bdata),hex(bdata) FROM tasks WHERE id=1")==[('text','blob','00FF')]
             control.write_text(json.dumps({'mode':'edit','code':'0010'}));send(b'\r');send(b'e');until(lambda:data('SELECT code FROM tasks WHERE id=1')==[('0010',)]);dismiss();checks.append('detail edit')
             send(b'dd');send(b'y\r');until(lambda:data('SELECT id FROM tasks WHERE id=1')==[]);dismiss();checks.append('confirmed delete')
-            control.write_text(json.dumps({'mode':'bulk','code':'0004','insert':[{'id':3,'code':'0003','payload':{'ok':True},'bdata':blob}]}));send(b'E');drain(.2);send(b'q');send(b'y\r');until(lambda:data('SELECT id,code FROM tasks ORDER BY id')==[(2,'0004'),(3,'0003')]);dismiss();checks.append('atomic explicit bulk update+insert')
+            control.write_text(json.dumps({'mode':'bulk','code':'0004','insert':[{'id':3,'code':'0003','payload':{'ok':True},'bdata':blob}]}));send(b'E');drain(.2);send(b'y\r');until(lambda:data('SELECT id,code FROM tasks ORDER BY id')==[(2,'0004'),(3,'0003')]);dismiss();checks.append('atomic explicit bulk update+insert')
             send(b':');send(b'SELECT * FROM tasks ORDER BY id\r');send(b'/');send(b'code = \'0004\'\r');drain();send(b'q');checks.append('nested raw paging/filter')
             send(b' ');send(b'j ');send(b'dd');drain(.2);send(b'q');send(b'y\r');until(lambda:data('SELECT id FROM tasks')==[]);dismiss();checks.append('atomic marked deletion')
             send(b'q');until(lambda:process.poll() is not None)

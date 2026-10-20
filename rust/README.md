@@ -9,6 +9,10 @@ PostgreSQL now opens the same interactive browser with `--postgres`, using
 `DBCLI_POSTGRES_URL` from the environment. It is writable by default; `--read-only` enforces server read-only sessions.
 See [Current PostgreSQL writes and safety](POSTGRES_WRITABLE.md) for policy, codecs and protocol.
 
+E bulk editing now opens a private Neovim diff directly. Save and exit with ` :wqa `
+for a count-only confirmation; `:cq` cancels and unchanged exit never writes.
+See [BULK_NEOVIM.md](BULK_NEOVIM.md). Other editor controls retain `EDITOR`.
+
 ## Current quickstart
 
 From the repository root, in a real POSIX terminal:
@@ -29,7 +33,7 @@ inside active `/` or `:` prompts**; Tab cycles contextual completion suggestions
 
 Multi-insert, explicit bulk editing and marked `dd` deletion use atomic SQLite
 transactions. `E` uses `{updates:[{original,row}], delete:[], insert:[]}` with a
-complete scrollable preview and confirmation; removing an update entry never
+Neovim diff and count-only confirmation; removing an update entry never
 implies deletion. Complete original primary keys, immutable snapshots, strict
 BLOB decoding and JSON TEXT preservation protect writes. Native PostgreSQL/MySQL
 protocol adapters remain available. PostgreSQL interactive browsing is now available

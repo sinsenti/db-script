@@ -1192,24 +1192,53 @@ fn bulk_edit(
     for row in &source {
         crate::writable::identity(row, &keys).map_err(DbError::adapter)?;
     }
-    let template = crate::writable::bulk_template(&source);
-    let Some(edited) = edit_json(template, guard).map_err(|e| DbError::adapter(e.to_string()))?
-    else {
-        return Ok(());
+    let mut template = crate::writable::bulk_template(&source);
+    for pair in template["updates"].as_array_mut().unwrap() {
+        for value in pair["row"].as_object_mut().unwrap().values_mut() {
+            if let Some(decoded) = value
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .filter(|v| v.is_array() || v.is_object())
+            {
+                *value = decoded;
+            }
+        }
+    }
+    let text =
+        serde_json::to_string_pretty(&template).map_err(|e| DbError::adapter(e.to_string()))?;
+    let session = crate::bulk_editor::Session::create(&text).map_err(DbError::adapter)?;
+    let words =
+        crate::bulk_editor::words(&crate::bulk_editor::configured()).map_err(DbError::adapter)?;
+    guard
+        .suspend()
+        .map_err(|e| DbError::adapter(e.to_string()))?;
+    let edited = session.run(&words, || {
+        signal_flag().load(std::sync::atomic::Ordering::Relaxed)
+    });
+    drop(session);
+    guard
+        .resume()
+        .map_err(|e| DbError::adapter(e.to_string()))?;
+    let edited = match edited.map_err(DbError::adapter)? {
+        crate::bulk_editor::Outcome::Cancelled => {
+            notice(guard, "Bulk edit cancelled — no writes")
+                .map_err(|e| DbError::adapter(e.to_string()))?;
+            return Ok(());
+        }
+        crate::bulk_editor::Outcome::Unchanged => {
+            notice(guard, "No changes — no writes").map_err(|e| DbError::adapter(e.to_string()))?;
+            return Ok(());
+        }
+        crate::bulk_editor::Outcome::Edited(text) => serde_json::from_str::<Value>(&text)
+            .map_err(|_| DbError::adapter("Invalid bulk JSON; nothing written"))?,
     };
+    let edited =
+        crate::bulk_editor::changed_plan(edited, &template, &keys).map_err(DbError::adapter)?;
     let actions = crate::writable::bulk_plan(&source, &edited, &keys).map_err(DbError::adapter)?;
     if actions.is_empty() {
+        notice(guard, "No changes — no writes").map_err(|e| DbError::adapter(e.to_string()))?;
         return Ok(());
     }
-    pager(
-        guard,
-        &format!(
-            "Bulk preview: {} explicit actions\n{}",
-            actions.len(),
-            serde_json::to_string_pretty(&actions).unwrap()
-        ),
-    )
-    .map_err(|e| DbError::adapter(e.to_string()))?;
     if actions.iter().any(|a| a["kind"] == "delete")
         && prompt(guard, "Confirm explicit deletions: type DELETE: ", "")
             .map_err(|e| DbError::adapter(e.to_string()))?
@@ -1217,8 +1246,15 @@ fn bulk_edit(
     {
         return Ok(());
     }
-    if prompt(guard, "Apply atomic bulk changes? y/N: ", "")
-        .map_err(|e| DbError::adapter(e.to_string()))?
+    if prompt(
+        guard,
+        &format!(
+            "Bulk: {}. Apply atomic changes? y/N: ",
+            crate::bulk_editor::summary(&actions)
+        ),
+        "",
+    )
+    .map_err(|e| DbError::adapter(e.to_string()))?
         == "y"
     {
         adapter.apply_batch(table, &actions)?;

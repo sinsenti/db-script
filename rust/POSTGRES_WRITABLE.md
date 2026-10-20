@@ -39,8 +39,7 @@ transport; TLS-required endpoints remain unsupported.
 `a` accepts one object or an array, `e` edits the current original row, `E`
 uses explicit `{updates:[{original,row}],insert:[],delete:[]}`, and `dd`
 deletes the current or marked rows. PostgreSQL insert/edit opens a scrollable
-transaction preview: finish with q, then y + Enter to apply. Bulk preview and
-explicit deletion confirmations remain. Omitted edited rows never imply deletion.
+transaction preview: finish with q, then y + Enter to apply. Bulk E uses a private Neovim diff, then count-only confirmation (see [BULK_NEOVIM.md](BULK_NEOVIM.md)); explicit deletion confirmations remain. Omitted edited rows never imply deletion.
 
 Generated/default/identity columns are omitted from insert templates; supply
 optional defaults manually if desired. Generated/GENERATED ALWAYS identity values
