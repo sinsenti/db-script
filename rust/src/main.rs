@@ -74,10 +74,17 @@ fn main() {
         eprintln!("--engine is supported only with --protocol");
         process::exit(2);
     }
-    let database = database.unwrap_or_else(|| {
-        eprintln!("a SQLite path is required");
-        process::exit(2)
-    });
+    let database = match database {
+        Some(path) => path,
+        None => match tui::select_database() {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("No SQLite database selected; pass DATABASE or --db PATH");
+                return;
+            }
+            Err(error) => fail(error),
+        },
+    };
     if !database.exists() {
         eprintln!("database does not exist: {}", database.display());
         process::exit(2)
@@ -146,7 +153,7 @@ where
     }
 }
 
-fn fail(error: dbcli_rust::DbError) {
+fn fail(error: dbcli_rust::DbError) -> ! {
     eprintln!("{}: {}", error.class_name, error.message);
     process::exit(1)
 }

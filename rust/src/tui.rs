@@ -8,9 +8,10 @@ use crossterm::{
 };
 use serde_json::{Map, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,6 +22,7 @@ struct TerminalGuard {
 }
 impl TerminalGuard {
     fn new() -> io::Result<Self> {
+        install_signals();
         terminal::enable_raw_mode()?;
         if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
             let _ = terminal::disable_raw_mode();
@@ -69,22 +71,155 @@ fn draw(text: &str) -> io::Result<()> {
 }
 fn read_key() -> io::Result<KeyEvent> {
     loop {
-        if let Event::Key(key) = event::read()? {
-            return Ok(key);
+        if signal_flag().load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                }
+                return Ok(key);
+            }
         }
     }
 }
 fn prompt(guard: &mut TerminalGuard, label: &str, initial: &str) -> io::Result<String> {
-    guard.suspend()?;
-    print!("\n{label}");
-    if !initial.is_empty() {
-        print!("(current: {initial}) ");
+    prompt_complete(guard, label, initial, &[])
+}
+fn prompt_complete(
+    guard: &mut TerminalGuard,
+    label: &str,
+    initial: &str,
+    candidates: &[String],
+) -> io::Result<String> {
+    let mut text = initial.to_string();
+    let mut cursor = text.chars().count();
+    let mut completion = crate::completion::State::default();
+    loop {
+        print!("\r\x1b[2K\x1b[?25h{label}{text}");
+        io::stdout().flush()?;
+        let k = read_key()?;
+        match k.code {
+            KeyCode::Enter => {
+                print!("\x1b[?25l");
+                return Ok(text);
+            }
+            KeyCode::Esc => {
+                print!("\x1b[?25l");
+                return Ok(initial.into());
+            }
+            KeyCode::Char('g') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(edited) = edit_text(&text, "sql", guard)? {
+                    text = edited.trim().into();
+                    cursor = text.chars().count();
+                }
+            }
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                text.clear();
+                cursor = 0;
+            }
+            KeyCode::Backspace => {
+                if cursor > 0 {
+                    let mut cs = text.chars().collect::<Vec<_>>();
+                    cs.remove(cursor - 1);
+                    cursor -= 1;
+                    text = cs.into_iter().collect();
+                }
+            }
+            KeyCode::Left => cursor = cursor.saturating_sub(1),
+            KeyCode::Right => cursor = (cursor + 1).min(text.chars().count()),
+            KeyCode::Home => cursor = 0,
+            KeyCode::End => cursor = text.chars().count(),
+            KeyCode::Tab => {
+                text = completion.next(&text, candidates);
+                cursor = text.chars().count();
+            }
+            KeyCode::Char(ch) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut cs = text.chars().collect::<Vec<_>>();
+                cs.insert(cursor, ch);
+                cursor += 1;
+                text = cs.into_iter().collect();
+            }
+            _ => {}
+        }
     }
-    io::stdout().flush()?;
-    let mut value = String::new();
-    io::stdin().read_line(&mut value)?;
-    guard.resume()?;
-    Ok(value.trim().to_owned())
+}
+fn edit_text(text: &str, suffix: &str, guard: &mut TerminalGuard) -> io::Result<Option<String>> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = TempJson(std::env::temp_dir().join(format!(
+        "dbcli-rust-{}-{nonce}.{suffix}",
+        std::process::id()
+    )));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary.0)?;
+    file.write_all(text.as_bytes())?;
+    drop(file);
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+        ["nvim", "vim", "nano"]
+            .iter()
+            .find(|s| command_exists(s))
+            .unwrap_or(&"nano")
+            .to_string()
+    });
+    let words = split_editor_command(&editor);
+    if words.is_empty() {
+        return Err(io::Error::other("invalid EDITOR command"));
+    }
+    guard.suspend()?;
+    let status = Command::new(&words[0])
+        .args(&words[1..])
+        .arg(&temporary.0)
+        .status();
+    let restore = guard.resume();
+    restore?;
+    if status?.success() {
+        fs::read_to_string(&temporary.0).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+fn pager(guard: &mut TerminalGuard, text: &str) -> io::Result<()> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut offset = 0;
+    loop {
+        let (_, h) = size();
+        let view = h.saturating_sub(3).max(1);
+        offset = offset.min(lines.len().saturating_sub(1));
+        draw(&format!(
+            "{}\n[j/k Ctrl-D/U gg/G scroll; q finish preview]",
+            lines[offset..]
+                .iter()
+                .take(view)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))?;
+        let k = read_key()?;
+        match k.code {
+            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Char('b') | KeyCode::Esc => {
+                return Ok(())
+            }
+            KeyCode::Char('j') => offset = (offset + 1).min(lines.len().saturating_sub(1)),
+            KeyCode::Char('k') => offset = offset.saturating_sub(1),
+            KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                offset = (offset + view / 2).min(lines.len().saturating_sub(1))
+            }
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                offset = offset.saturating_sub(view / 2)
+            }
+            KeyCode::Char('g') => offset = 0,
+            KeyCode::Char('G') => offset = lines.len().saturating_sub(view),
+            _ => {}
+        }
+        let _ = guard;
+    }
 }
 fn wait_any() -> io::Result<()> {
     let _ = read_key()?;
@@ -113,24 +248,15 @@ fn row_map(headers: &[String], row: &[Value]) -> Map<String, Value> {
 }
 fn json_roundtrip_for_edit(
     original: &Map<String, Value>,
-    edited: Map<String, Value>,
+    updated: Map<String, Value>,
 ) -> Map<String, Value> {
-    edited
-        .into_iter()
-        .map(|(k, v)| {
-            let converted = original
-                .get(&k)
-                .and_then(Value::as_str)
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .is_some();
-            let value = if converted && (v.is_object() || v.is_array()) {
-                Value::String(crate::json_value_to_text(&v))
-            } else {
-                v
-            };
-            (k, value)
-        })
-        .collect()
+    crate::writable::normalize_editor_row(
+        &Value::Object(original.clone()),
+        &Value::Object(updated.clone()),
+    )
+    .ok()
+    .and_then(|v| v.as_object().cloned())
+    .unwrap_or(updated)
 }
 struct TempJson(PathBuf);
 impl TempJson {
@@ -142,10 +268,12 @@ impl TempJson {
         let path =
             std::env::temp_dir().join(format!("dbcli-rust-{}-{nonce}.json", std::process::id()));
         let temporary = Self(path);
-        fs::write(
-            &temporary.0,
-            serde_json::to_vec_pretty(value).unwrap_or_default(),
-        )?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary.0)?;
+        file.write_all(&serde_json::to_vec_pretty(value).unwrap_or_default())?;
         Ok(temporary)
     }
     fn edit(self, guard: &mut TerminalGuard) -> io::Result<Option<Value>> {
@@ -225,9 +353,37 @@ fn split_editor_command(command: &str) -> Vec<String> {
         words
     }
 }
-fn edit_json(value: Value, guard: &mut TerminalGuard) -> io::Result<Option<Value>> {
+fn edit_json(mut value: Value, guard: &mut TerminalGuard) -> io::Result<Option<Value>> {
+    fn editable(value: &Value) -> Value {
+        Value::Object(
+            value
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_str()
+                            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                            .filter(|v| v.is_object() || v.is_array())
+                            .unwrap_or_else(|| v.clone()),
+                    )
+                })
+                .collect(),
+        )
+    }
+    if value.get("updates").is_some_and(Value::is_array)
+        && value.get("delete").is_some_and(Value::is_array)
+    {
+        for pair in value["updates"].as_array_mut().unwrap() {
+            pair["row"] = editable(&pair["row"]);
+        }
+    } else if value.is_object() {
+        value = editable(&value)
+    }
     TempJson::create(&value)?.edit(guard)
 }
+
 fn detail_screen(
     headers: &[String],
     row: &[Value],
@@ -285,7 +441,7 @@ fn table_pick(
         let (w, h) = size();
         let active: Vec<_> = tables
             .iter()
-            .filter(|t| filter.is_empty() || t.to_lowercase().contains(&filter.to_lowercase()))
+            .filter(|t| crate::completion::fuzzy(&filter, t))
             .collect();
         cursor = cursor.min(active.len().saturating_sub(1));
         let mut lines = vec![
@@ -293,7 +449,12 @@ fn table_pick(
             format!("Filter: {}", filter),
             "j/k move | Enter browse | / filter | q exit".into(),
         ];
-        for (i, t) in active.iter().enumerate().take(h.saturating_sub(5)) {
+        for (i, t) in active
+            .iter()
+            .enumerate()
+            .skip(cursor.saturating_sub(h.saturating_sub(6)))
+            .take(h.saturating_sub(5))
+        {
             lines.push(format!("{} {}", if i == cursor { ">" } else { " " }, t));
         }
         let _ = w;
@@ -353,12 +514,13 @@ fn pick_foreign_key(
     }
 }
 fn browse(adapter: &SQLiteAdapter, table: &str, guard: &mut TerminalGuard) -> Result<(), DbError> {
-    browse_with_filter(adapter, table, None, guard)
+    browse_with_filter(adapter, table, None, None, guard)
 }
 fn browse_with_filter(
     adapter: &SQLiteAdapter,
     table: &str,
     initial_filter: Option<String>,
+    raw: Option<String>,
     guard: &mut TerminalGuard,
 ) -> Result<(), DbError> {
     let mut offset = 0i64;
@@ -367,24 +529,37 @@ fn browse_with_filter(
     let mut col_offset = 0usize;
     let mut filter = initial_filter;
     let mut sort: Option<Vec<String>> = None;
-    let mut marked = BTreeSet::new();
+    let mut marked: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    let keys = if raw.is_none() {
+        adapter.primary_keys(table)?
+    } else {
+        vec![]
+    };
+    let tables = adapter.list_tables(false)?;
     let mut hidden = BTreeSet::new();
     loop {
         let (width, height) = size();
         let limit = (height as i64 - 7).max(3);
-        let current =
-            match adapter.fetch_page(table, limit, offset, filter.as_deref(), sort.as_deref()) {
-                Ok(page) => page,
-                Err(error) => {
-                    filter = None;
-                    sort = None;
-                    offset = 0;
-                    cursor = 0;
-                    notice(guard, &error.message).map_err(|e| DbError::adapter(e.to_string()))?;
-                    continue;
-                }
-            };
-        let count = match adapter.count_rows(table, filter.as_deref()) {
+        let current = match if let Some(sql) = &raw {
+            adapter.raw_page(sql, limit, offset, filter.as_deref(), sort.as_deref())
+        } else {
+            adapter.fetch_page(table, limit, offset, filter.as_deref(), sort.as_deref())
+        } {
+            Ok(page) => page,
+            Err(error) => {
+                filter = None;
+                sort = None;
+                offset = 0;
+                cursor = 0;
+                notice(guard, &error.message).map_err(|e| DbError::adapter(e.to_string()))?;
+                continue;
+            }
+        };
+        let count = match if let Some(sql) = &raw {
+            adapter.raw_count(sql, filter.as_deref())
+        } else {
+            adapter.count_rows(table, filter.as_deref())
+        } {
             Ok(count) => count,
             Err(error) if error.message.starts_with("Unknown SQLite table:") => return Err(error),
             Err(error) => {
@@ -397,6 +572,16 @@ fn browse_with_filter(
             }
         };
         cursor = cursor.min(current.rows.len().saturating_sub(1));
+        let mut completions =
+            crate::completion::candidates(&current.headers, &current.rows, &tables);
+        if raw.is_none() {
+            for fk in adapter.navigation_foreign_keys(table)? {
+                completions.push(format!(
+                    "JOIN {} ON {}.{} = {}.{}",
+                    fk.to_table, table, fk.from_col, fk.to_table, fk.to_col
+                ));
+            }
+        }
         let (headers, rows) = if hidden.is_empty() {
             (current.headers.clone(), current.rows.clone())
         } else {
@@ -433,9 +618,17 @@ fn browse_with_filter(
             cursor,
             focused_col,
             col_offset,
-            &marked,
+            &current
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    marked.contains_key(&mark_id(&keys, &row_map(&current.headers, r)))
+                })
+                .map(|(i, _)| i)
+                .collect(),
             true,
-            adapter.is_read_only(),
+            adapter.is_read_only() || raw.is_some(),
         );
         if adapter.is_read_only() {
             if let Some(first) = screen.lines().next() {
@@ -446,14 +639,15 @@ fn browse_with_filter(
         let _ = draw(&screen);
         let key = read_key().map_err(|e| DbError::adapter(e.to_string()))?;
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Esc => return Ok(()),
+            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Char('b') | KeyCode::Esc => {
+                return Ok(())
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if cursor + 1 < current.rows.len() {
                     cursor += 1
                 } else if current.rows.len() as i64 == limit {
                     offset += limit;
                     cursor = 0;
-                    marked.clear()
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -462,16 +656,14 @@ fn browse_with_filter(
                 } else if offset >= limit {
                     offset -= limit;
                     cursor = limit.saturating_sub(1) as usize;
-                    marked.clear()
                 }
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if event::poll(Duration::from_millis(300)).unwrap_or(false) {
                     if let Event::Key(k) = event::read().unwrap_or(Event::FocusLost) {
                         if k.code == KeyCode::Char('g') {
                             offset = 0;
                             cursor = 0;
-                            marked.clear()
                         }
                     }
                 }
@@ -487,7 +679,6 @@ fn browse_with_filter(
                 if count > 0 {
                     offset = ((count - 1) / limit) * limit;
                     cursor = ((count - 1) % limit) as usize;
-                    marked.clear()
                 }
             }
             KeyCode::PageDown | KeyCode::Char('d')
@@ -495,25 +686,37 @@ fn browse_with_filter(
                     || key.code == KeyCode::PageDown =>
             {
                 if current.rows.len() as i64 == limit {
-                    offset = (offset + limit).min(count.saturating_sub(1).max(0));
+                    offset = (offset + (limit / 2).max(1)).min(count.saturating_sub(1).max(0));
                     cursor = 0;
-                    marked.clear();
                 }
             }
             KeyCode::PageUp | KeyCode::Char('u')
                 if key.modifiers.contains(KeyModifiers::CONTROL) || key.code == KeyCode::PageUp =>
             {
-                if offset >= limit {
-                    offset -= limit;
+                offset = (offset - (limit / 2).max(1)).max(0);
+                cursor = 0;
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(value) = edit_text(filter.as_deref().unwrap_or(""), "sql", guard)
+                    .map_err(|e| DbError::adapter(e.to_string()))?
+                {
+                    filter = (!value.trim().is_empty()).then(|| value.trim().to_string());
+                    offset = 0;
                     cursor = 0;
-                    marked.clear();
                 }
             }
+            KeyCode::Char('c') => {
+                filter = None;
+                sort = None;
+                offset = 0;
+                cursor = 0;
+            }
             KeyCode::Char('/') => {
-                let f = prompt(
+                let f = prompt_complete(
                     guard,
                     "Filter (text or SQL expression; empty clears): ",
                     filter.as_deref().unwrap_or(""),
+                    &completions,
                 )
                 .map_err(|e| DbError::adapter(e.to_string()))?;
                 filter = if f.is_empty() { None } else { Some(f) };
@@ -521,36 +724,30 @@ fn browse_with_filter(
                 cursor = 0;
             }
             KeyCode::Char('o') | KeyCode::Char('O') => {
-                let c = prompt(
-                    guard,
-                    "Sort column: ",
-                    sort.as_ref()
-                        .and_then(|s| s.first())
-                        .map(String::as_str)
-                        .unwrap_or(""),
-                )
-                .map_err(|e| DbError::adapter(e.to_string()))?;
-                let d = prompt(
-                    guard,
-                    "Direction ASC/DESC: ",
-                    sort.as_ref()
-                        .and_then(|s| s.get(1))
-                        .map(String::as_str)
-                        .unwrap_or("ASC"),
-                )
-                .map_err(|e| DbError::adapter(e.to_string()))?;
-                sort = if c.is_empty() {
-                    None
-                } else {
-                    Some(vec![c, if d.is_empty() { "ASC".into() } else { d }])
-                };
-                offset = 0;
+                if let Some(column) = view.headers.get(focused_col) {
+                    let next = vec![
+                        column.clone(),
+                        if key.code == KeyCode::Char('o') {
+                            "ASC".into()
+                        } else {
+                            "DESC".into()
+                        },
+                    ];
+                    sort = if sort.as_ref() == Some(&next) {
+                        None
+                    } else {
+                        Some(next)
+                    };
+                    offset = 0;
+                }
             }
             KeyCode::Char(' ') => {
-                if marked.contains(&cursor) {
-                    marked.remove(&cursor);
-                } else {
-                    marked.insert(cursor);
+                if let Some(row) = current.rows.get(cursor) {
+                    let row = row_map(&current.headers, row);
+                    let id = mark_id(&keys, &row);
+                    if marked.remove(&id).is_none() {
+                        marked.insert(id, row);
+                    }
                 }
             }
             KeyCode::Char('v') => {
@@ -566,16 +763,16 @@ fn browse_with_filter(
                     }
                 }
             }
-            KeyCode::Char('S') => {
+            KeyCode::Char('S') if raw.is_none() => {
                 let r = adapter.schema_info(table)?;
-                notice(guard, &format_result(&r)).map_err(|e| DbError::adapter(e.to_string()))?;
+                pager(guard, &format_result(&r)).map_err(|e| DbError::adapter(e.to_string()))?;
             }
-            KeyCode::Char('I') => {
+            KeyCode::Char('I') if raw.is_none() => {
                 let r = adapter.indexes(table)?;
-                notice(guard, &format_result(&r)).map_err(|e| DbError::adapter(e.to_string()))?;
+                pager(guard, &format_result(&r)).map_err(|e| DbError::adapter(e.to_string()))?;
             }
             KeyCode::Char(':') => {
-                let cmd = prompt(guard, "SQL/filter or row number: ", "")
+                let cmd = prompt_complete(guard, "SQL/filter or row number: ", "", &completions)
                     .map_err(|e| DbError::adapter(e.to_string()))?;
                 if let Ok(n) = cmd.parse::<i64>() {
                     if n > 0 {
@@ -587,19 +784,17 @@ fn browse_with_filter(
                         || cmd.to_ascii_uppercase().starts_with("WITH")
                         || cmd.to_ascii_uppercase().starts_with("EXPLAIN")
                     {
-                        let raw = adapter.execute_readonly(&cmd, &[], 50, 0)?;
-                        notice(guard, &format_result(&raw))
-                            .map_err(|e| DbError::adapter(e.to_string()))?;
+                        browse_with_filter(adapter, "Query", None, Some(cmd), guard)?;
                     } else {
                         filter = Some(cmd);
                         offset = 0;
                     }
                 }
             }
-            KeyCode::Char('f') => {
+            KeyCode::Char('f') if raw.is_none() => {
                 if let Some(row) = current.rows.get(cursor) {
                     let item = row_map(&current.headers, row);
-                    let fks = adapter.foreign_keys(table)?;
+                    let fks = adapter.navigation_foreign_keys(table)?;
                     if fks.is_empty() {
                         notice(guard, "No foreign key relations found")
                             .map_err(|e| DbError::adapter(e.to_string()))?;
@@ -623,7 +818,13 @@ fn browse_with_filter(
                                 crate::quote_identifier(&fk.to_col).unwrap_or_default(),
                                 sql_export_literal(val)
                             );
-                            browse_with_filter(adapter, &fk.to_table, Some(next_filter), guard)?;
+                            browse_with_filter(
+                                adapter,
+                                &fk.to_table,
+                                Some(next_filter),
+                                None,
+                                guard,
+                            )?;
                         }
                     }
                 }
@@ -656,7 +857,11 @@ fn browse_with_filter(
                         let k = read_key().map_err(|e| DbError::adapter(e.to_string()))?;
                         if matches!(
                             k.code,
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Enter
+                            KeyCode::Esc
+                                | KeyCode::Char('q')
+                                | KeyCode::Char('h')
+                                | KeyCode::Char('b')
+                                | KeyCode::Enter
                         ) {
                             break;
                         }
@@ -676,15 +881,23 @@ fn browse_with_filter(
                             detail_offset = max_offset;
                             continue;
                         }
-                        if k.code == KeyCode::PageDown {
+                        if k.code == KeyCode::Char(' ')
+                            || k.code == KeyCode::PageDown
+                            || k.code == KeyCode::Char('d')
+                                && k.modifiers.contains(KeyModifiers::CONTROL)
+                        {
                             detail_offset = (detail_offset + viewport / 2).min(max_offset);
                             continue;
                         }
-                        if k.code == KeyCode::PageUp {
+                        if k.code == KeyCode::PageUp
+                            || k.code == KeyCode::Char('u')
+                                && k.modifiers.contains(KeyModifiers::CONTROL)
+                        {
                             detail_offset = detail_offset.saturating_sub(viewport / 2);
                             continue;
                         }
-                        if k.code == KeyCode::Char('e') && !adapter.is_read_only() {
+                        if k.code == KeyCode::Char('e') && !adapter.is_read_only() && raw.is_none()
+                        {
                             let original = row_map(&current.headers, row);
                             if let Some(v) = edit_json(Value::Object(original.clone()), guard)
                                 .map_err(|e| DbError::adapter(e.to_string()))?
@@ -697,7 +910,8 @@ fn browse_with_filter(
                                 }
                             }
                         }
-                        if k.code == KeyCode::Char('d') && !adapter.is_read_only() {
+                        if k.code == KeyCode::Char('d') && !adapter.is_read_only() && raw.is_none()
+                        {
                             if event::poll(Duration::from_millis(300)).unwrap_or(false) {
                                 if matches!(
                                     event::read(),
@@ -706,9 +920,9 @@ fn browse_with_filter(
                                         ..
                                     }))
                                 ) {
-                                    let answer = prompt(guard, "Delete this row? type yes: ", "")
+                                    let answer = prompt(guard, "Delete this row? y/N: ", "")
                                         .map_err(|e| DbError::adapter(e.to_string()))?;
-                                    if answer == "yes" {
+                                    if answer == "y" || answer == "yes" {
                                         adapter
                                             .delete_row(table, &row_map(&current.headers, row))?;
                                         break;
@@ -719,22 +933,38 @@ fn browse_with_filter(
                     }
                 }
             }
-            KeyCode::Char('a') if !adapter.is_read_only() => {
-                let template: Map<String, Value> = current
+            KeyCode::Char('a') if !adapter.is_read_only() && raw.is_none() => {
+                let template = current
                     .headers
                     .iter()
                     .map(|h| (h.clone(), Value::Null))
-                    .collect();
-                if let Some(Value::Object(row)) = edit_json(Value::Object(template), guard)
+                    .collect::<Map<_, _>>();
+                if let Some(edited) = edit_json(Value::Object(template), guard)
                     .map_err(|e| DbError::adapter(e.to_string()))?
                 {
-                    adapter.insert_row(table, &row)?;
+                    let rows = if let Some(rows) = edited.as_array() {
+                        rows.clone()
+                    } else {
+                        vec![edited]
+                    };
+                    let actions = rows
+                        .into_iter()
+                        .map(|row| serde_json::json!({"kind":"insert","row":row}))
+                        .collect::<Vec<_>>();
+                    adapter.apply_batch(table, &actions)?;
                 }
             }
-            KeyCode::Char('E') if !adapter.is_read_only() => {
-                bulk_edit(adapter, table, filter.as_deref(), sort.as_deref(), guard)?;
+            KeyCode::Char('E') if !adapter.is_read_only() && raw.is_none() => {
+                bulk_edit(
+                    adapter,
+                    table,
+                    filter.as_deref(),
+                    sort.as_deref(),
+                    &marked,
+                    guard,
+                )?;
             }
-            KeyCode::Char('e') if !adapter.is_read_only() => {
+            KeyCode::Char('e') if !adapter.is_read_only() && raw.is_none() => {
                 if let Some(row) = current.rows.get(cursor) {
                     let original = row_map(&current.headers, row);
                     if let Some(Value::Object(updated)) =
@@ -749,37 +979,76 @@ fn browse_with_filter(
                     }
                 }
             }
-            KeyCode::Char('d') if !adapter.is_read_only() => {
-                if event::poll(Duration::from_millis(300)).unwrap_or(false) {
-                    if matches!(
-                        event::read(),
-                        Ok(Event::Key(KeyEvent {
-                            code: KeyCode::Char('d'),
-                            ..
-                        }))
+            KeyCode::Char('d') if !adapter.is_read_only() && raw.is_none() => {
+                if event::poll(Duration::from_millis(300)).unwrap_or(false)
+                    && read_key()
+                        .map_err(|e| DbError::adapter(e.to_string()))?
+                        .code
+                        == KeyCode::Char('d')
+                {
+                    let selected = if marked.is_empty() {
+                        current
+                            .rows
+                            .get(cursor)
+                            .map(|r| vec![row_map(&current.headers, r)])
+                            .unwrap_or_default()
+                    } else {
+                        marked.values().cloned().collect::<Vec<_>>()
+                    };
+                    if selected.is_empty() {
+                        continue;
+                    }
+                    let actions = selected
+                        .into_iter()
+                        .map(|row| serde_json::json!({"kind":"delete","original":row}))
+                        .collect::<Vec<_>>();
+                    if !marked.is_empty() {
+                        pager(
+                            guard,
+                            &format!(
+                                "Marked deletion preview: {} rows\n{}",
+                                actions.len(),
+                                serde_json::to_string_pretty(&actions).unwrap()
+                            ),
+                        )
+                        .map_err(|e| DbError::adapter(e.to_string()))?;
+                    }
+                    if ["y", "yes"].contains(
+                        &prompt(
+                            guard,
+                            &format!("Delete {} selected row(s)? y/N: ", actions.len()),
+                            "",
+                        )
+                        .map_err(|e| DbError::adapter(e.to_string()))?
+                        .as_str(),
                     ) {
-                        if let Some(row) = current.rows.get(cursor) {
-                            let answer = prompt(guard, "Delete selected row? type yes: ", "")
-                                .map_err(|e| DbError::adapter(e.to_string()))?;
-                            if answer == "yes" {
-                                adapter.delete_row(table, &row_map(&current.headers, row))?;
-                            }
-                        }
+                        adapter.apply_batch(table, &actions)?;
+                        marked.clear();
                     }
                 }
             }
             KeyCode::Char('x') | KeyCode::Char('X') => {
                 let (hs, rs) = if marked.is_empty() {
-                    let all_rows = adapter.fetch_page(
-                        table,
-                        100_000,
-                        0,
-                        filter.as_deref(),
-                        sort.as_deref(),
-                    )?;
+                    let all_rows = if let Some(sql) = &raw {
+                        adapter.raw_page(sql, 100000, 0, filter.as_deref(), sort.as_deref())?
+                    } else {
+                        adapter.fetch_page(table, 100000, 0, filter.as_deref(), sort.as_deref())?
+                    };
                     (all_rows.headers, all_rows.rows)
                 } else {
-                    selected_export_data(&current, &marked)
+                    (
+                        current.headers.clone(),
+                        marked
+                            .values()
+                            .map(|row| {
+                                current
+                                    .headers
+                                    .iter()
+                                    .map(|h| row.get(h).cloned().unwrap_or(Value::Null))
+                                    .collect()
+                            })
+                            .collect(),
+                    )
                 };
                 let typ = if key.code == KeyCode::Char('x') {
                     "json".to_string()
@@ -811,137 +1080,69 @@ fn browse_with_filter(
         }
     }
 }
+fn mark_id(keys: &[String], row: &Map<String, Value>) -> String {
+    crate::writable::identity(&Value::Object(row.clone()), keys)
+        .unwrap_or_else(|_| serde_json::to_string(row).unwrap())
+}
 fn bulk_edit(
     adapter: &SQLiteAdapter,
     table: &str,
     filter: Option<&str>,
     sort: Option<&[String]>,
+    marked: &BTreeMap<String, Map<String, Value>>,
     guard: &mut TerminalGuard,
 ) -> Result<(), DbError> {
-    let original = adapter.fetch_page(table, 100_000, 0, filter, sort)?;
-    if original.rows.is_empty() {
-        return Ok(());
+    let source = if marked.is_empty() {
+        let original = adapter.fetch_page(table, 100001, 0, filter, sort)?;
+        if original.rows.len() > 100000 {
+            return Err(DbError::adapter("bulk editing is limited to 100000 rows"));
+        }
+        original
+            .rows
+            .iter()
+            .map(|r| Value::Object(row_map(&original.headers, r)))
+            .collect::<Vec<_>>()
+    } else {
+        marked
+            .values()
+            .cloned()
+            .map(Value::Object)
+            .collect::<Vec<_>>()
+    };
+    let keys = adapter.primary_keys(table)?;
+    for row in &source {
+        crate::writable::identity(row, &keys).map_err(DbError::adapter)?;
     }
-    let schema = adapter.schema_info(table)?;
-    let pk_indices: Vec<usize> = schema
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.get(5).and_then(Value::as_str) == Some("YES"))
-        .filter_map(|(i, _)| {
-            original
-                .headers
-                .iter()
-                .position(|h| h == &schema.rows[i][1].as_str().unwrap_or_default())
-        })
-        .collect();
-    if pk_indices.is_empty() {
-        return Err(DbError {
-            class_name: "RowIdentityError".into(),
-            message: "Bulk editing requires a primary key; use insert or edit rows individually"
-                .into(),
-        });
-    }
-    let original_maps: Vec<Map<String, Value>> = original
-        .rows
-        .iter()
-        .map(|row| row_map(&original.headers, row))
-        .collect();
-    let editor_rows: Vec<Value> = original_maps
-        .iter()
-        .map(|map| {
-            Value::Object(
-                map.iter()
-                    .map(|(key, value)| {
-                        let editable = value
-                            .as_str()
-                            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                            .filter(|v| v.is_object() || v.is_array())
-                            .unwrap_or_else(|| value.clone());
-                        (key.clone(), editable)
-                    })
-                    .collect(),
-            )
-        })
-        .collect();
-    let Some(Value::Array(updated_rows)) =
-        edit_json(Value::Array(editor_rows), guard).map_err(|e| DbError::adapter(e.to_string()))?
+    let template = crate::writable::bulk_template(&source);
+    let Some(edited) = edit_json(template, guard).map_err(|e| DbError::adapter(e.to_string()))?
     else {
         return Ok(());
     };
-    let mut keyed_updates: Vec<(Vec<Value>, Map<String, Value>)> = Vec::new();
-    for value in updated_rows {
-        let Some(updated) = value.as_object() else {
-            continue;
-        };
-        if updated.keys().any(|key| !original.headers.contains(key)) {
-            return Err(DbError::adapter("Bulk editor contains an unknown column"));
-        }
-        let normalized = json_roundtrip_for_edit(&original_maps[0], updated.clone());
-        let identity: Vec<Value> = pk_indices
-            .iter()
-            .map(|i| {
-                normalized
-                    .get(&original.headers[*i])
-                    .cloned()
-                    .unwrap_or(Value::Null)
-            })
-            .collect();
-        if !original_maps.iter().any(|row| {
-            pk_indices
-                .iter()
-                .map(|i| {
-                    row.get(&original.headers[*i])
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                })
-                .collect::<Vec<_>>()
-                == identity
-        }) {
-            return Err(DbError {
-                class_name: "RowIdentityError".into(),
-                message: "Bulk editing cannot add rows or change primary keys; use the insert or single-row editor".into(),
-            });
-        }
-        keyed_updates.push((identity, normalized));
-    }
-    let mut updates = Vec::new();
-    let mut deletions = Vec::new();
-    for original_row in &original_maps {
-        let identity: Vec<Value> = pk_indices
-            .iter()
-            .map(|i| {
-                original_row
-                    .get(&original.headers[*i])
-                    .cloned()
-                    .unwrap_or(Value::Null)
-            })
-            .collect();
-        if let Some((_, updated)) = keyed_updates.iter().find(|(key, _)| *key == identity) {
-            if updated != original_row {
-                updates.push((original_row.clone(), updated.clone()));
-            }
-        } else {
-            deletions.push(original_row.clone());
-        }
-    }
-    if updates.is_empty() && deletions.is_empty() {
-        notice(guard, "No changes detected").map_err(|e| DbError::adapter(e.to_string()))?;
+    let actions = crate::writable::bulk_plan(&source, &edited, &keys).map_err(DbError::adapter)?;
+    if actions.is_empty() {
         return Ok(());
     }
-    let preview = format!("Bulk edit preview for {table}: {} updated, {} deleted.\n\nChanges:\n{}\n\nOnly rows identified by their original primary keys are updated. New rows and key changes must use the single-row actions.",
-        updates.len(), deletions.len(), updates.iter().take(12).map(|(old, new)| format!("- {}\n+ {}", serde_json::to_string_pretty(old).unwrap_or_default(), serde_json::to_string_pretty(new).unwrap_or_default())).collect::<Vec<_>>().join("\n"));
-    notice(guard, &preview).map_err(|e| DbError::adapter(e.to_string()))?;
-    let confirmation = prompt(guard, "Apply this bulk edit? type yes: ", "")
-        .map_err(|e| DbError::adapter(e.to_string()))?;
-    if confirmation != "yes" {
+    pager(
+        guard,
+        &format!(
+            "Bulk preview: {} explicit actions\n{}",
+            actions.len(),
+            serde_json::to_string_pretty(&actions).unwrap()
+        ),
+    )
+    .map_err(|e| DbError::adapter(e.to_string()))?;
+    if actions.iter().any(|a| a["kind"] == "delete")
+        && prompt(guard, "Confirm explicit deletions: type DELETE: ", "")
+            .map_err(|e| DbError::adapter(e.to_string()))?
+            != "DELETE"
+    {
         return Ok(());
     }
-    for (old, new) in updates {
-        adapter.update_row(table, &old, &new)?;
-    }
-    for old in deletions {
-        adapter.delete_row(table, &old)?;
+    if prompt(guard, "Apply atomic bulk changes? y/N: ", "")
+        .map_err(|e| DbError::adapter(e.to_string()))?
+        == "y"
+    {
+        adapter.apply_batch(table, &actions)?;
     }
     Ok(())
 }
@@ -1133,4 +1334,84 @@ pub fn discover_sqlite_files(dir: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
+}
+
+pub fn select_database() -> Result<Option<PathBuf>, DbError> {
+    let files = crate::completion::discover(Path::new("."));
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut guard = TerminalGuard::new().map_err(|e| DbError::adapter(e.to_string()))?;
+    let mut cursor = 0usize;
+    let mut filter = String::new();
+    loop {
+        let active = files
+            .iter()
+            .filter(|p| crate::completion::fuzzy(&filter, &p.to_string_lossy()))
+            .collect::<Vec<_>>();
+        cursor = cursor.min(active.len().saturating_sub(1));
+        let (_, h) = size();
+        let mut lines = vec!["Local SQLite databases — j/k Enter / search q exit".into()];
+        lines.extend(
+            active
+                .iter()
+                .enumerate()
+                .skip(cursor.saturating_sub(h.saturating_sub(5)))
+                .take(h.saturating_sub(3))
+                .map(|(i, p)| format!("{} {}", if i == cursor { ">" } else { " " }, p.display())),
+        );
+        draw(&lines.join("\n")).map_err(|e| DbError::adapter(e.to_string()))?;
+        match read_key()
+            .map_err(|e| DbError::adapter(e.to_string()))?
+            .code
+        {
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+            KeyCode::Char('j') | KeyCode::Down => {
+                cursor = (cursor + 1).min(active.len().saturating_sub(1))
+            }
+            KeyCode::Char('k') | KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Enter if !active.is_empty() => return Ok(Some(active[cursor].to_path_buf())),
+            KeyCode::Char('/') => {
+                filter = prompt(&mut guard, "Filter databases: ", &filter)
+                    .map_err(|e| DbError::adapter(e.to_string()))?;
+                cursor = 0
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod writable_ui_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn editor_files_are_private_and_removed() {
+        let temporary = TempJson::create(&serde_json::json!({"only":"synthetic"})).unwrap();
+        let path = temporary.0.clone();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(temporary);
+        assert!(!path.exists());
+    }
+}
+
+fn signal_flag() -> &'static std::sync::Arc<std::sync::atomic::AtomicBool> {
+    static FLAG: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        std::sync::OnceLock::new();
+    FLAG.get_or_init(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+}
+fn install_signals() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for signal in [
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
+            signal_hook::consts::SIGINT,
+        ] {
+            let _ = signal_hook::flag::register(signal, signal_flag().clone());
+        }
+    });
 }

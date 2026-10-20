@@ -13,9 +13,11 @@ use std::{
     rc::Rc,
 };
 
+pub mod completion;
 pub mod remote;
 pub mod render;
 pub mod tui;
+pub mod writable;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryResult {
@@ -121,6 +123,7 @@ impl SQLiteAdapter {
                     name: r.get(1)?,
                     typ: r
                         .get::<_, Option<String>>(2)?
+                        .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "TEXT".to_owned()),
                     notnull: r.get::<_, i64>(3)? != 0,
                     default: default_value_to_string(r.get(4)?),
@@ -228,13 +231,52 @@ impl SQLiteAdapter {
                 Ok(ForeignKey {
                     from_col: r.get(3)?,
                     to_table: r.get(2)?,
-                    to_col: r.get(4)?,
+                    to_col: r
+                        .get::<_, Option<String>>(4)?
+                        .unwrap_or_else(|| "None".into()),
                 })
             })
             .map_err(sqlite_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_error)?;
         Ok(keys)
+    }
+    pub fn navigation_foreign_keys(&self, table: &str) -> Result<Vec<ForeignKey>, DbError> {
+        let conn = self.connect()?;
+        let mut keys = self.foreign_keys(table)?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA foreign_key_list({})",
+                quote_identifier(table)?
+            ))
+            .map_err(sqlite_error)?;
+        let seq = stmt
+            .query_map([], |r| r.get::<_, usize>(1))
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)?;
+        for (key, seq) in keys.iter_mut().zip(seq) {
+            if key.to_col == "None" {
+                key.to_col = self
+                    .pk_conn(&conn, &key.to_table)?
+                    .get(seq)
+                    .cloned()
+                    .ok_or_else(|| {
+                        DbError::adapter("implicit FK target has no corresponding primary key")
+                    })?;
+            }
+        }
+        Ok(keys)
+    }
+    pub fn primary_keys(&self, table: &str) -> Result<Vec<String>, DbError> {
+        self.pk_conn(&self.connect()?, table)
+    }
+    pub fn apply_batch(&self, table: &str, actions: &[Value]) -> Result<usize, DbError> {
+        self.validate_write()?;
+        writable::apply(&mut self.connect()?, table, actions, |v| {
+            value_to_sql(&normalize_json_value(v)).map_err(|e| e.to_string())
+        })
+        .map_err(write_error)
     }
     fn filter_order(
         &self,
@@ -284,59 +326,20 @@ impl SQLiteAdapter {
         self.record(&sql, &params);
         conn.query_row(
             &sql,
-            rusqlite::params_from_iter(params_from_values(&params).iter()),
+            rusqlite::params_from_iter(params_from_values(&params)?.iter()),
             |r| r.get(0),
         )
         .map_err(sqlite_error)
     }
-    pub fn insert_row(&self, table: &str, row: &Map<String, Value>) -> Result<usize, DbError> {
+    fn single_write(&self, table: &str, action: Value) -> Result<usize, DbError> {
         self.validate_write()?;
-        let conn = self.connect()?;
-        let cols = self.columns_conn(&conn, table)?;
-        let mut unknown: Vec<_> = row.keys().filter(|k| !cols.contains(k)).cloned().collect();
-        unknown.sort();
-        if !unknown.is_empty() {
-            return Err(DbError::adapter(format!(
-                "Unknown column(s) for {table}: {}",
-                python_repr_list(&unknown)
-            )));
-        }
-        let (sql, params) = if row.is_empty() {
-            (
-                format!("INSERT INTO {} DEFAULT VALUES", quote_identifier(table)?),
-                vec![],
-            )
-        } else {
-            let names: Vec<_> = row.keys().cloned().collect();
-            let quoted = names
-                .iter()
-                .map(|n| quote_identifier(n))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(", ");
-            let placeholders = vec!["?"; names.len()].join(", ");
-            let vals = names
-                .iter()
-                .map(|n| normalize_json_value(&row[n]))
-                .collect();
-            (
-                format!(
-                    "INSERT INTO {} ({quoted}) VALUES ({placeholders})",
-                    quote_identifier(table)?
-                ),
-                vals,
-            )
-        };
-        self.record(&sql, &params);
-        let mut stmt = conn.prepare(&sql).map_err(sqlite_error)?;
-        stmt.execute(rusqlite::params_from_iter(
-            params_from_values(&params).iter(),
-        ))
-        .map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK");
-            DbError::adapter(format!("SQLite insert failed: {}", clean_sqlite_error(&e)))
-        })?;
-        conn.execute_batch("COMMIT").ok();
-        Ok(conn.changes() as usize)
+        writable::apply_single(&mut self.connect()?, table, action, |v| {
+            value_to_sql(&normalize_json_value(v)).map_err(|e| e.to_string())
+        })
+        .map_err(write_error)
+    }
+    pub fn insert_row(&self, table: &str, row: &Map<String, Value>) -> Result<usize, DbError> {
+        self.single_write(table, json!({"kind":"insert","row":row}))
     }
     pub fn update_row(
         &self,
@@ -344,61 +347,62 @@ impl SQLiteAdapter {
         original: &Map<String, Value>,
         updated: &Map<String, Value>,
     ) -> Result<usize, DbError> {
-        self.validate_write()?;
-        let conn = self.connect()?;
-        let cols = self.columns_conn(&conn, table)?;
-        let pks = self.pk_conn(&conn, table)?;
-        let mut unknown: Vec<_> = updated
-            .keys()
-            .filter(|k| !cols.contains(k))
-            .cloned()
-            .collect();
-        unknown.sort();
-        if !unknown.is_empty() {
-            return Err(DbError::adapter(format!(
-                "Unknown column(s) for {table}: {}",
-                python_repr_list(&unknown)
-            )));
-        }
-        let (where_sql, where_params) = build_pk_where(original, &pks)?;
-        let changed: Vec<_> = updated
-            .iter()
-            .filter(|(k, v)| original.get(*k) != Some(*v))
-            .map(|(k, v)| (k.clone(), normalize_json_value(v)))
-            .collect();
-        if changed.is_empty() {
-            return Ok(0);
-        }
-        let assignments = changed
-            .iter()
-            .map(|(k, _)| Ok(format!("{} = ?", quote_identifier(k)?)))
-            .collect::<Result<Vec<String>, DbError>>()?
-            .join(", ");
-        let mut params: Vec<Value> = changed.into_iter().map(|(_, v)| v).collect();
-        params.extend(where_params);
-        let sql = format!(
-            "UPDATE {} SET {assignments} WHERE {where_sql}",
-            quote_identifier(table)?
-        );
-        self.record(&sql, &params);
-        conn.execute(
-            &sql,
-            rusqlite::params_from_iter(params_from_values(&params).iter()),
+        self.single_write(
+            table,
+            json!({"kind":"update","original":original,"row":updated}),
         )
-        .map_err(|e| DbError::adapter(format!("SQLite update failed: {}", clean_sqlite_error(&e))))
     }
     pub fn delete_row(&self, table: &str, original: &Map<String, Value>) -> Result<usize, DbError> {
-        self.validate_write()?;
-        let conn = self.connect()?;
-        let pks = self.pk_conn(&conn, table)?;
-        let (where_sql, params) = build_pk_where(original, &pks)?;
-        let sql = format!("DELETE FROM {} WHERE {where_sql}", quote_identifier(table)?);
-        self.record(&sql, &params);
-        conn.execute(
-            &sql,
-            rusqlite::params_from_iter(params_from_values(&params).iter()),
+        self.single_write(table, json!({"kind":"delete","original":original}))
+    }
+    pub fn raw_page(
+        &self,
+        sql: &str,
+        limit: i64,
+        offset: i64,
+        filter: Option<&str>,
+        sort: Option<&[String]>,
+    ) -> Result<QueryResult, DbError> {
+        if sql.trim_start().to_ascii_uppercase().starts_with("EXPLAIN") {
+            if filter.is_some_and(|s| !s.is_empty()) || sort.is_some() {
+                return Err(DbError::adapter(
+                    "EXPLAIN supports paging; filter/sort require SELECT output",
+                ));
+            }
+            return self.execute_readonly(sql, &[], limit, offset);
+        }
+        let headers = self.execute_readonly(sql, &[], 1, 0)?.headers;
+        let (w, p) = build_filter_clause(filter, &headers)?;
+        let o = build_order_clause(sort, &headers)?;
+        self.execute_readonly(
+            &format!(
+                "SELECT * FROM ({}) AS _raw_view {w} {o}",
+                sql.trim().trim_end_matches(';')
+            ),
+            &p,
+            limit,
+            offset,
         )
-        .map_err(|e| DbError::adapter(format!("SQLite delete failed: {}", clean_sqlite_error(&e))))
+    }
+    pub fn raw_count(&self, sql: &str, filter: Option<&str>) -> Result<i64, DbError> {
+        if sql.trim_start().to_ascii_uppercase().starts_with("EXPLAIN") {
+            return Ok(self.execute_readonly(sql, &[], 100000, 0)?.rows.len() as i64);
+        }
+        let headers = self.execute_readonly(sql, &[], 1, 0)?.headers;
+        let (w, p) = build_filter_clause(filter, &headers)?;
+        Ok(self
+            .execute_readonly(
+                &format!(
+                    "SELECT COUNT(*) FROM ({}) _raw_count {w}",
+                    sql.trim().trim_end_matches(';')
+                ),
+                &p,
+                1,
+                0,
+            )?
+            .rows[0][0]
+            .as_i64()
+            .unwrap_or(0))
     }
     pub fn execute_readonly(
         &self,
@@ -427,6 +431,7 @@ impl SQLiteAdapter {
                 "Only SELECT, WITH and EXPLAIN statements are allowed here",
             ));
         }
+        ensure_single(statement)?;
         let conn = self.connect()?;
         conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
             AuthAction::Insert { .. }
@@ -555,7 +560,7 @@ impl SQLiteAdapter {
                     Ok((
                         r.get::<_, String>(3)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, String>(4)?,
+                        r.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     ))
                 })
                 .map_err(sqlite_error)?;
@@ -924,38 +929,35 @@ fn trace_value(v: &Value) -> Value {
         normalize_json_value(v)
     }
 }
-fn value_to_sql(v: &Value) -> rusqlite::types::Value {
+fn value_to_sql(v: &Value) -> Result<rusqlite::types::Value, DbError> {
     use rusqlite::types::Value as V;
-    if v.is_null() {
-        return V::Null;
-    }
-    if let Some(b) = v.as_bool() {
-        return V::Integer(if b { 1 } else { 0 });
-    }
-    if let Some(i) = v.as_i64() {
-        return V::Integer(i);
-    }
-    if let Some(i) = v.as_u64() {
-        return V::Integer(i as i64);
-    }
-    if let Some(f) = v.as_f64() {
-        return V::Real(f);
-    }
-    if let Some(s) = v.as_str() {
-        return V::Text(s.to_owned());
-    }
-    if let Some(m) = v.as_object() {
-        if m.len() == 1 {
-            if let Some(Value::String(s)) = m.get("$blob") {
-                if let Ok(b) = BASE64.decode(s) {
-                    return V::Blob(b);
-                }
-            }
+    Ok(match v {
+        Value::Null => V::Null,
+        Value::Bool(b) => V::Integer(i64::from(*b)),
+        Value::Number(n) if n.as_i64().is_some() => V::Integer(n.as_i64().unwrap()),
+        Value::Number(n) if n.as_u64().is_some() => {
+            return Err(DbError::adapter(
+                "integer exceeds SQLite signed 64-bit range",
+            ))
         }
-    }
-    V::Text(v.to_string())
+        Value::Number(n) => V::Real(
+            n.as_f64()
+                .ok_or_else(|| DbError::adapter("invalid numeric value"))?,
+        ),
+        Value::String(s) => V::Text(s.clone()),
+        Value::Object(m) if m.len() == 1 && m.contains_key("$blob") => V::Blob(
+            BASE64
+                .decode(
+                    m["$blob"]
+                        .as_str()
+                        .ok_or_else(|| DbError::adapter("blob tag requires base64 string"))?,
+                )
+                .map_err(|_| DbError::adapter("invalid blob base64"))?,
+        ),
+        _ => V::Text(json_value_to_text(v)),
+    })
 }
-fn params_from_values(v: &[Value]) -> Vec<rusqlite::types::Value> {
+fn params_from_values(v: &[Value]) -> Result<Vec<rusqlite::types::Value>, DbError> {
     v.iter().map(value_to_sql).collect()
 }
 fn sql_value_to_json(v: rusqlite::types::Value) -> Value {
@@ -982,7 +984,7 @@ fn row_values(row: &Row<'_>) -> Result<Vec<Value>, rusqlite::Error> {
         .collect()
 }
 fn query_all(stmt: &mut Statement<'_>, params: &[Value]) -> Result<Vec<Vec<Value>>, DbError> {
-    let bind = params_from_values(params);
+    let bind = params_from_values(params)?;
     let mut result = Vec::new();
     let mut rows = stmt
         .query(rusqlite::params_from_iter(bind.iter()))
@@ -998,7 +1000,7 @@ fn query_window(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Vec<Value>>, DbError> {
-    let bind = params_from_values(params);
+    let bind = params_from_values(params)?;
     let mut result = Vec::new();
     let mut rows = stmt
         .query(rusqlite::params_from_iter(bind.iter()))
@@ -1020,6 +1022,8 @@ fn query_window(
 #[derive(Debug, Deserialize)]
 pub struct ProtocolRequest {
     pub op: String,
+    #[serde(default)]
+    pub actions: Vec<Value>,
     #[serde(default)]
     pub table: Option<String>,
     #[serde(default)]
@@ -1079,6 +1083,7 @@ impl SQLiteAdapter {
                     req.sort.as_deref(),
                 )?)
                 .unwrap()),
+                "apply_batch" => Ok(json!(self.apply_batch(table()?, &req.actions)?)),
                 "count" => Ok(json!(self.count_rows(table()?, req.filter.as_deref())?)),
                 "insert" => Ok(json!(self.insert_row(
                     table()?,
@@ -1154,4 +1159,76 @@ impl SQLiteAdapter {
             .unwrap(),
         }
     }
+}
+
+fn write_error(s: String) -> DbError {
+    DbError::new(
+        if s.contains("primary key") {
+            "RowIdentityError"
+        } else if s.contains("64-bit") {
+            "OverflowError"
+        } else {
+            "AdapterError"
+        },
+        s,
+    )
+}
+
+fn ensure_single(sql: &str) -> Result<(), DbError> {
+    let mut chars = sql.chars().peekable();
+    let mut quote = None;
+    let mut line = false;
+    let mut block = false;
+    let mut ended = false;
+    while let Some(c) = chars.next() {
+        if line {
+            if c == '\n' {
+                line = false;
+            }
+            continue;
+        }
+        if block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block = false;
+            }
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                if chars.peek() == Some(&q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        if c == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            line = true;
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            block = true;
+            continue;
+        }
+        if c.is_whitespace() {
+            continue;
+        }
+        if ended {
+            return Err(DbError::new(
+                "AdapterError",
+                "You can only execute one statement at a time",
+            ));
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '[' => quote = Some(']'),
+            ';' => ended = true,
+            _ => {}
+        }
+    }
+    Ok(())
 }

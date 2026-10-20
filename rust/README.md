@@ -111,3 +111,7 @@ values, blobs/NULLs, schema and FK metadata, SQL/bind traces, CRUD state,
 read-only and raw-query rejection cases, and fixed-dimension rendering against
 the production Python adapter/UI. Never run mutation workloads against a
 personal or production database.
+
+## Writable SQLite upgrade
+
+See [WRITABLE_SQLITE.md](WRITABLE_SQLITE.md) for the current build, native TUI controls, atomic bulk format, safety rules and validation. Historical benchmark results above refer to earlier frozen binaries.
