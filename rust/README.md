@@ -1,4 +1,50 @@
-# Rust database browser and remote protocol
+# Rust database browser — current writable SQLite build
+
+Python remains the reference implementation. This branch's native Rust SQLite
+browser is **writable by default**. `--read-only` opens SQLite read-only and
+rejects mutations. SQLite is now **bundled with FTS5**; a system SQLite development
+package or linker bootstrap is not required.
+
+## Current quickstart
+
+From the repository root, in a real POSIX terminal:
+
+```sh
+cargo build --release --locked --manifest-path rust/Cargo.toml
+rust/target/release/dbcli-rust --db /path/to/database.sqlite --table tasks
+rust/target/release/dbcli-rust --read-only --db /path/to/database.sqlite
+```
+
+Without a target, current-directory SQLite signature discovery offers a searchable
+file picker. The table picker supports fuzzy search and scrolling. The browser
+supports navigation and row cards, filter/sort/jump, visibility, stable marks,
+CRUD, FK navigation, raw-query paging/filter/sort/export, and complete schema,
+index/constraint/trigger inspection. Ctrl+G edits the browser filter **and text
+inside active `/` or `:` prompts**; Tab cycles contextual completion suggestions.
+
+Multi-insert, explicit bulk editing and marked `dd` deletion use atomic SQLite
+transactions. `E` uses `{updates:[{original,row}], delete:[], insert:[]}` with a
+complete scrollable preview and confirmation; removing an update entry never
+implies deletion. Complete original primary keys, immutable snapshots, strict
+BLOB decoding and JSON TEXT preservation protect writes. Native PostgreSQL/MySQL
+protocol adapters remain available; remote interactive/Docker browsing is outside
+this SQLite upgrade.
+
+See **[WRITABLE_SQLITE.md](WRITABLE_SQLITE.md)** for authoritative current controls,
+bulk/protocol formats, exports, safety rules, validation and remaining limitations.
+
+```sh
+cargo test --locked --manifest-path rust/Cargo.toml
+python3 rust/tests/writable_pty.py rust/target/release/dbcli-rust --kind original
+```
+
+## Historical baseline notes — not current behavior
+
+**Everything below describes the earlier frozen benchmark implementation.** It is
+retained for historical build/measurement context. Its system-SQLite requirements,
+nontransactional bulk workflow and claims about missing discovery/completion or
+active-prompt Ctrl+G are obsolete. Use the current quickstart and linked document
+above for this branch; the historical measurements have not been rerun or relabeled.
 
 This is the Rust CLI/browser port for SQLite plus the selected PostgreSQL/MySQL
 JSONL workloads. Python remains the reference implementation and full
@@ -9,7 +55,7 @@ values, original/composite-primary-key identity checks, and bounded read-query
 handling. PostgreSQL/MySQL support is currently protocol-only; the interactive
 browser and Docker/legacy CLI discovery paths remain SQLite-only.
 
-## Build and launch
+### Build and launch
 
 A SQLite development library/linker file is required to build (for example,
 `libsqlite3-dev` on Debian/Ubuntu); the executable dynamically links the system
@@ -53,7 +99,7 @@ not transactional. It refuses bulk edits without a primary key and directs users
 to single-row editing for primary-key changes. Writes remain per-row commits,
 like the Python adapter/UI path.
 
-## Compatibility notes
+### Compatibility notes
 
 - Pass a SQLite path explicitly. Unlike Python, this port does not discover
   SQLite files in the current directory and does not discover Docker databases.
@@ -96,7 +142,7 @@ before running it; remote timing additionally requires three-candidate parity
 and the shared timing lock. See [`REMOTE.md`](../benchmarks/language_comparison/REMOTE.md)
 for the exact shared protocol and commands.
 
-## Tests and parity
+### Tests and parity
 
 ```sh
 cd rust
@@ -111,7 +157,3 @@ values, blobs/NULLs, schema and FK metadata, SQL/bind traces, CRUD state,
 read-only and raw-query rejection cases, and fixed-dimension rendering against
 the production Python adapter/UI. Never run mutation workloads against a
 personal or production database.
-
-## Writable SQLite upgrade
-
-See [WRITABLE_SQLITE.md](WRITABLE_SQLITE.md) for the current build, native TUI controls, atomic bulk format, safety rules and validation. Historical benchmark results above refer to earlier frozen binaries.
