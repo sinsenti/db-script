@@ -1,0 +1,80 @@
+# Rust database browser
+
+Main includes the **Original Rust backend** selected from the PostgreSQL `quotes`
+comparison, plus its matching Ratatui interface. Python remains available through
+`db.py` / `dbcli`. SQLite and PostgreSQL sessions are writable by default.
+
+## Build
+
+Rust/Cargo and a C compiler are required. The exercised toolchain was Rust 1.98.1.
+SQLite is bundled. Neovim must be on PATH for `E` bulk editing.
+
+```bash
+bash tools/build_rust.sh
+```
+
+## Start
+
+```bash
+# Your running Docker PostgreSQL, opening quotes directly:
+python3 tools/rust.py --postgres --table public.quotes
+
+# Existing SQLite database:
+python3 tools/rust.py --database ~/.timetrace/timetrace.db
+
+# Explicit read-only session:
+python3 tools/rust.py --postgres --table public.quotes --read-only
+
+# Original terminal interface over the same backend:
+python3 tools/rust.py --postgres --table public.quotes --legacy
+```
+
+The Docker default is `a1labs-postgres-1`; use `--container NAME` to change it.
+For an existing `DBCLI_POSTGRES_URL`, pass `--from-env`. Credentials are resolved
+in memory and passed in the environment. No comparison worktree is required.
+The Python launcher uses only the standard library; native binaries can run
+without Python when credentials are already configured:
+
+```bash
+./ui/rust/target/release/dbcli-ui-rust --engine postgres \
+  --worker "$PWD/rust/target/release/dbcli-rust" --table public.quotes
+./rust/target/release/dbcli-rust --db ~/.timetrace/timetrace.db
+```
+
+## Editing
+
+`a` inserts, `e` edits one row, and `dd` deletes after confirmation. `E` opens a
+private Neovim diff: original on the left, editable plan on the right. Use `zR`
+to open folds, `:wqa` to return to operation-count confirmation, or `:cq` to cancel.
+Unchanged edits dispatch no writes. Confirmed bulk changes run atomically; omitted
+update entries never imply deletion. Use `DBCLI_BULK_EDITOR='nvim --clean'` for a
+clean Neovim profile. Single-row/filter/SQL editors honor `EDITOR`.
+
+See [backend controls](rust/WRITABLE_SQLITE.md), [PostgreSQL contracts](rust/POSTGRES_WRITABLE.md)
+and [Ratatui controls](ui/rust/README.md). Bulk editing is bounded to 100,000 rows
+and holds data in memory. PostgreSQL TLS-required endpoints and interactive MySQL
+browsing are unsupported. Raw SQL remains read-only in writable sessions.
+
+## Verification
+
+```bash
+cargo test --locked --manifest-path rust/Cargo.toml
+cargo test --locked --manifest-path ui/rust/Cargo.toml
+python3 -m unittest discover -s tools -p 'test_*.py' -q
+DBCLI_RUN_INTEGRATION=0 python3 -m unittest discover -s tests -q
+```
+
+Mutation tests use disposable fixtures only. Live application databases must not
+be used as mutation fixtures. Optional PostgreSQL Neovim checks can use the marked
+fixture managed by `tools/postgres_write_fixture.py`; see the backend/UI test docs.
+
+## Source selection
+
+- Backend: `codex_rust_quotes_original`, commit `c51eae7fa2b32a23c84ce64e45fd36ecfaf378ff`.
+- Ratatui: `codex_rust_quotes_neovim`, commit `24fc85ebd8b893ff0b1ac5b1987ba93910e97c80`.
+- Docker connection helper: `codex_codex_quotes_perf`, source commit `908bf7d`.
+
+The backend was the fastest measured full-table reader (128.2 ms for 771 quotes)
+and had the lowest measured bulk worker CPU. The full Rust bulk UI still uses more
+memory than the Go/Python UIs; selection does not imply a win on every metric.
+Comparison branches, binaries and reports remain preserved in their worktrees.

@@ -1,0 +1,34 @@
+{
+  "selected_backend_commit": "c51eae7fa2b32a23c84ce64e45fd36ecfaf378ff",
+  "selected_ui_commit": "24fc85ebd8b893ff0b1ac5b1987ba93910e97c80",
+  "backend_runtime_source_unchanged": true,
+  "backend_rust_tests_passed": 34,
+  "ui_rust_unit_tests_passed": 21,
+  "ui_worker_checks": {
+    "sqlite_selected_backend": "passed",
+    "blocked_worker_cleanup": "passed",
+    "optional_rich_postgres_read_test": "not configured; separate PostgreSQL checks used"
+  },
+  "launcher_tests_passed": 8,
+  "python_offline_passed": 35,
+  "python_optional_integration_skipped": 2,
+  "disposable_postgres_checks_passed": 45,
+  "legacy_sqlite_pty_checks_passed": 8,
+  "real_neovim_scenarios_passed": 16,
+  "application_database_mutated": false,
+  "notes": [
+    "Neovim checks cover both interfaces and SQLite/PostgreSQL: unchanged, cancellation, confirmed edit, termination.",
+    "PostgreSQL tests create and drop owned schemas in a verified labelled disposable container on an alternate loopback port.",
+    "No source or binaries from earlier comparison worktrees were modified."
+  ],
+  "release_artifacts": {
+    "rust/target/release/dbcli-rust": {
+      "sha256": "725c21e04c2b64c9e46736856eca29ca3517d128f53ae8e1867c945bb95a7b42",
+      "bytes": 6668184
+    },
+    "ui/rust/target/release/dbcli-ui-rust": {
+      "sha256": "5b78a56eada8e85de2e64d8c86ba5c90058a91e1d7eb354ede5acdad6652b4a7",
+      "bytes": 2935656
+    }
+  }
+}

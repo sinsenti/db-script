@@ -1,0 +1,27 @@
+[package]
+name = "dbcli-ui-rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[dependencies]
+libc = "0.2"
+ratatui = "=0.30.2"
+serde = {version="1",features=["derive"]}
+serde_json = {version="1",features=["preserve_order","arbitrary_precision"]}
+unicode-width = "0.2"
+unicode-segmentation = "1"
+base64 = "0.22"
+regex = "1"
+tempfile = "3"
+shell-words = "1"
+signal-hook = "0.3"
+csv = "1"
+
+[dev-dependencies]
+rusqlite = {version="0.32",features=["bundled"]}
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
