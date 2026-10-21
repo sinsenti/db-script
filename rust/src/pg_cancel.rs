@@ -16,13 +16,32 @@ use std::{
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static STATE: Mutex<State> = Mutex::new(State {
     id: None,
-    cancelled_through: 0,
+    pending_cancel: None,
+    cancelled: false,
     token: None,
 });
 struct State {
     id: Option<u64>,
-    cancelled_through: u64,
+    pending_cancel: Option<u64>,
+    cancelled: bool,
     token: Option<CancelToken>,
+}
+
+impl State {
+    fn start(&mut self, id: Option<u64>) {
+        self.id = id;
+        self.cancelled = id.is_some() && self.pending_cancel == id;
+        self.token = None;
+    }
+    fn cancel(&mut self, id: u64) -> Option<CancelToken> {
+        self.pending_cancel = Some(id);
+        if self.id == Some(id) {
+            self.cancelled = true;
+            self.token.clone()
+        } else {
+            None
+        }
+    }
 }
 
 pub fn is_read_operation(op: &str) -> bool {
@@ -85,12 +104,7 @@ pub fn install() -> Result<(), &'static str> {
                 let id = u64::from_le_bytes(frame);
                 let token = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    state.cancelled_through = state.cancelled_through.max(id);
-                    if state.id == Some(id) {
-                        state.token.clone()
-                    } else {
-                        None
-                    }
+                    state.cancel(id)
                 };
                 if let Some(token) = token {
                     // The driver sends PostgreSQL CancelRequest using its secret token.
@@ -113,18 +127,14 @@ pub struct Operation {
 pub fn begin(id: Option<u64>, read: bool) -> Operation {
     let id = id.filter(|_| read && ENABLED.load(Ordering::Acquire));
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.id = id;
-    state.token = None;
+    state.start(id);
     Operation { id }
 }
 impl Operation {
     pub fn cancelled(&self) -> bool {
         self.id.is_some_and(|id| {
-            STATE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .cancelled_through
-                >= id
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.id == Some(id) && state.cancelled
         })
     }
 }
@@ -132,8 +142,7 @@ impl Drop for Operation {
     fn drop(&mut self) {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if state.id == self.id {
-            state.id = None;
-            state.token = None;
+            state.start(None);
         }
     }
 }
@@ -144,8 +153,8 @@ pub fn register_read(client: &Client) -> Result<(), ()> {
         return Ok(());
     }
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(id) = state.id {
-        if state.cancelled_through >= id {
+    if state.id.is_some() {
+        if state.cancelled {
             return Err(());
         }
         state.token = Some(client.cancel_token());
@@ -156,6 +165,27 @@ pub fn register_read(client: &Client) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unrelated_ids_never_cancel_the_active_read() {
+        let mut state = State {
+            id: None,
+            pending_cancel: None,
+            cancelled: false,
+            token: None,
+        };
+        state.start(Some(2));
+        state.cancel(1);
+        assert!(!state.cancelled);
+        state.cancel(3);
+        assert!(!state.cancelled);
+        state.start(Some(3)); // cancellation can precede connection registration
+        assert!(state.cancelled);
+        state.cancel(1); // late IDs do not undo cancellation of the current request
+        assert!(state.cancelled);
+        state.start(None); // writes never have a read ID
+        state.cancel(4);
+        assert!(!state.cancelled);
+    }
     #[test]
     fn mutations_never_register_for_read_cancellation() {
         for op in [

@@ -30,7 +30,7 @@ from terminal import Terminal
 CASES = ['insert', 'update', 'delete', 'edit_cancel', 'bulk', 'bulk_rollback',
          'readonly_controls', 'raw_write_guard', 'generated_edit', 'advanced_arrays_edit',
          'json_null_to_sql_null', 'sql_null_to_json_null', 'driver_cancel', 'stale_cancel',
-         'queued_cancel', 'write_not_cancelled', 'read_cancel', 'superseded_read', 'read_deadline']
+         'queued_cancel', 'unrelated_cancel', 'write_not_cancelled', 'read_cancel', 'superseded_read', 'read_deadline']
 
 
 def fixture(path):
@@ -154,7 +154,7 @@ def driver_case(action, args, data):
                 p.send(id, op='raw', sql='SELECT 7 AS n FROM pg_sleep(2.5)', limit=1, offset=0)
                 pid = wait(lambda: sleeping(c, tag))
                 start = time.monotonic()
-                p.cancel(1)
+                p.cancel(99 if action == 'unrelated_cancel' else 1)
                 result = p.result()
                 if action == 'driver_cancel':
                     assert not result['ok'] and '57014' in result['error']['message'], 'driver did not cancel server statement'
@@ -322,7 +322,7 @@ def main():
     for action in args.cases:
         # Failure output stays categorical: never print SQL rows or descriptor URLs.
         try:
-            (driver_case if action in ['driver_cancel','stale_cancel','queued_cancel','write_not_cancelled'] else ui_case)(action,args,data)
+            (driver_case if action in ['driver_cancel','stale_cancel','queued_cancel','unrelated_cancel','write_not_cancelled'] else ui_case)(action,args,data)
         except Exception as error:
             print(json.dumps({'failed': action, 'error': type(error).__name__, 'reason': str(error) if isinstance(error, AssertionError) else 'details suppressed', 'line': traceback.extract_tb(error.__traceback__)[-1].lineno}), flush=True)
             return 1
