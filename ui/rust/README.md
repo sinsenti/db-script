@@ -135,10 +135,15 @@ context-enveloped so literal byte tags and nested JSON arrays remain JSON.
 Bulk editing uses:
 
 ```json
-{"updates":[{"original":{"id":1,"name":"old"},"row":{"id":1,"name":"new"}}],"insert":[],"delete":[]}
+{"updates":[{"original":{"id":1},"row":{"id":1,"name":"new"}}],"insert":[],"delete":[]}
 ```
 
-`original` must remain the full source snapshot, including all non-PK columns.
+In the Neovim files, `original` must remain the unchanged complete primary-key
+object only; composite keys include every key field. Keep full editable values
+under `row`. The UI retains full original snapshots in memory and restores them
+only for requested actions before the existing validation/atomic worker call.
+Explicit `delete` entries use the same key-only objects. Worker protocol mutation
+requests still carry complete original snapshots, including non-PK columns.
 `inserts` is also accepted as an alias for `insert`. Omitted updates do not imply
 deletion. Duplicate identities are rejected, and PK changes use the single-row
 editor. E opens a private Neovim diff directly: original plan readonly/nomodifiable on
@@ -168,6 +173,10 @@ use `query_result` as a placeholder destination.
 
 Unmarked export and bulk selection fetch up to 100,000 rows in current filter/sort
 order. Marked export uses full selected snapshots, including hidden columns.
+All formats create a new private 0600 destination exclusively. Existing files,
+directories and symlinks are refused; the path prompt stays open so you can choose
+another filename. A failed export
+removes its own partial file rather than leaving a truncated result.
 JSON exports preserve ordinary JSON-looking TEXT as a string and native PostgreSQL
 JSON as structured/scalar JSON. BLOBs use `{"$bytes":"hex"}`. UUID/decimal/date/time/
 datetime retain worker typed envelopes. CSV uses scalar display text and cannot
@@ -252,10 +261,11 @@ rust_quotes_test, testing real Neovim no-op/cancel/edit/signal paths with native
 JSON/JSONB, SQLNULL versus JSONnull, literal tag-like JSON, large JSON integers,
 bytea and leading-zero TEXT. Application databases are never mutation fixtures.
 
-Both diff files carry a complete explicit plan, including full immutable original
-snapshots and editable rows. This costs more payload/memory than a compact-PK
-editor plan; no payload optimization is claimed in this phase. Source snapshots
-also remain in memory for validation. Private row data is not logged.
+Both diff files carry the compact explicit plan: immutable PK tokens plus full
+editable rows. Source snapshots stay in memory for validation, preserving stale-row
+checks without duplicating every original non-key field in the files. Bulk plans
+remain bounded in-memory operations; this does not imply streaming or a measured
+process-memory improvement. Private row data is not logged.
 
 ### PostgreSQL SQL replay
 

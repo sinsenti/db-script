@@ -21,3 +21,10 @@ Keep these semantics aligned with ui/rust/src/data.rs. New live replay tests in
 both Rust crates validate a marked disposable fixture via tests/support only.
 Standalone performance tooling lives in ../benchmarks/quotes_perf and resolves
 main-local paths; it must remain outside the production runtime dependency graph.
+
+Rust export destinations use export_file::write_new (create_new, mode 0600,
+cleanup on error); never reintroduce fs::write/from_path overwrites in UI exports.
+E editor originals/deletes are compact PK tokens; retain complete immutable
+snapshots in memory and expand only requested actions before strict validators.
+Keep the duplicated export_file.rs and bulk_editor.rs modules aligned across
+rust/ and ui/rust/. Protocol apply_batch originals remain full snapshots.

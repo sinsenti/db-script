@@ -247,13 +247,8 @@ mod tests {
 
 /// Drop unchanged editable rows before JSON-TEXT normalization can rewrite their
 /// original spelling. Still reject duplicate identities and modified snapshots.
-pub fn changed_plan(
-    mut edited: serde_json::Value,
-    initial: &serde_json::Value,
-    keys: &[String],
-) -> Result<serde_json::Value, String> {
+fn plan_identity(row: &serde_json::Value, keys: &[String]) -> Result<String, String> {
     use serde_json::Value;
-    use std::collections::{HashMap, HashSet};
     fn canonical(v: &Value) -> Value {
         match v {
             Value::Object(m) => {
@@ -269,27 +264,125 @@ pub fn changed_plan(
             _ => v.clone(),
         }
     }
-    let identity = |row: &Value| -> Result<String, String> {
-        if keys.is_empty() {
-            return Err("Bulk editing requires a primary key".into());
+    if keys.is_empty() {
+        return Err("Bulk editing requires a primary key".into());
+    }
+    let values = keys
+        .iter()
+        .map(|k| {
+            row.get(k)
+                .filter(|v| !v.is_null())
+                .map(canonical)
+                .ok_or_else(|| format!("Missing non-NULL original primary key {k}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Array(values).to_string())
+}
+
+/// Keep complete immutable snapshots in the application, but only PK tokens in
+/// the two editor files. The row field still contains all editable values.
+pub fn compact_document(
+    rows: &[serde_json::Value],
+    keys: &[String],
+    editable: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    use std::collections::HashSet;
+    if keys.is_empty() {
+        return Err("Bulk editing requires a primary key".into());
+    }
+    let mut seen = HashSet::new();
+    let mut updates = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = plan_identity(row, keys)?;
+        if !seen.insert(id) {
+            return Err("Duplicate source primary key".into());
         }
-        let values = keys
-            .iter()
-            .map(|k| {
-                row.get(k)
-                    .filter(|v| !v.is_null())
-                    .map(canonical)
-                    .ok_or_else(|| format!("Missing non-NULL original primary key {k}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Value::Array(values).to_string())
-    };
-    let source = initial["updates"]
+        updates.push(json!({"original":identity_token(row,keys)?,"row":editable(row)}));
+    }
+    Ok(json!({"updates":updates,"insert":[],"delete":[]}))
+}
+
+fn identity_token(row: &serde_json::Value, keys: &[String]) -> Result<serde_json::Value, String> {
+    plan_identity(row, keys)?;
+    Ok(serde_json::Value::Object(
+        keys.iter()
+            .map(|key| (key.clone(), row[key].clone()))
+            .collect(),
+    ))
+}
+
+/// Restore full original snapshots only for the actions actually requested.
+/// The existing strict validators and transaction conflict checks then run unchanged.
+pub fn expand_plan(
+    mut plan: serde_json::Value,
+    source: &[serde_json::Value],
+    keys: &[String],
+) -> Result<serde_json::Value, String> {
+    use std::collections::{HashMap, HashSet};
+    let mut originals = HashMap::new();
+    for row in source {
+        if originals.insert(plan_identity(row, keys)?, row).is_some() {
+            return Err("Duplicate source primary key".into());
+        }
+    }
+    let mut seen = HashSet::new();
+    for field in ["updates", "delete"] {
+        let entries = plan
+            .as_object_mut()
+            .ok_or("Bulk plan must be an object")?
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| format!("{field} must be an array"))?;
+        for entry in entries {
+            let token = if field == "updates" {
+                &entry["original"]
+            } else {
+                &*entry
+            };
+            let id = plan_identity(token, keys)?;
+            if !seen.insert(id.clone()) {
+                return Err("Duplicate update/delete identity".into());
+            }
+            let original = *originals
+                .get(&id)
+                .ok_or("Identity outside immutable selection")?;
+            if token != &identity_token(original, keys)? {
+                return Err(
+                    "Original identity token must contain only the unchanged primary key".into(),
+                );
+            }
+            if field == "updates" {
+                entry["original"] = original.clone();
+            } else {
+                *entry = original.clone();
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Skip unchanged editable rows before normalization; originals must stay immutable.
+pub fn changed_plan(
+    mut edited: serde_json::Value,
+    initial: &serde_json::Value,
+    keys: &[String],
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    use std::collections::{HashMap, HashSet};
+    let identity = |row: &Value| plan_identity(row, keys);
+    let mut source = HashMap::new();
+    for entry in initial["updates"]
         .as_array()
         .ok_or("Invalid original bulk plan")?
-        .iter()
-        .map(|entry| Ok((identity(&entry["original"])?, entry)))
-        .collect::<Result<HashMap<_, _>, String>>()?;
+    {
+        if source
+            .insert(identity(&entry["original"])?, entry)
+            .is_some()
+        {
+            return Err("Duplicate source primary key".into());
+        }
+    }
     let updates = edited["updates"]
         .as_array()
         .ok_or("updates must be an array")?;
@@ -336,6 +429,97 @@ pub fn summary(actions: &[serde_json::Value]) -> String {
 mod plan_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn compact_files_keep_one_editable_copy_and_expand_only_changed_actions() {
+        let source = vec![
+            json!({"tenant":"001","id":1,"payload":"wide synthetic text ".repeat(1000),"code":"00123"}),
+            json!({"tenant":"001","id":2,"payload":{"nested":[true,null]},"code":"00234"}),
+        ];
+        let keys = vec!["tenant".into(), "id".into()];
+        let compact = compact_document(&source, &keys, Clone::clone).unwrap();
+        assert_eq!(
+            compact["updates"][0]["original"],
+            json!({"tenant":"001","id":1})
+        );
+        assert_eq!(compact["updates"][0]["row"], source[0]);
+        let full = json!({"updates":source.iter().map(|row|json!({"original":row,"row":row})).collect::<Vec<_>>(),"insert":[],"delete":[]});
+        let compact_bytes = serde_json::to_vec_pretty(&compact).unwrap().len();
+        let full_bytes = serde_json::to_vec_pretty(&full).unwrap().len();
+        assert!(
+            compact_bytes * 100 < full_bytes * 60,
+            "wide-row editor payload should drop by at least 40%"
+        );
+        let no_changes = changed_plan(compact.clone(), &compact, &keys).unwrap();
+        assert!(no_changes["updates"].as_array().unwrap().is_empty());
+        let mut edited = compact.clone();
+        edited["updates"][0]["row"]["code"] = json!("00999");
+        edited["updates"].as_array_mut().unwrap().pop(); // Omission never deletes.
+        let expanded = expand_plan(
+            changed_plan(edited, &compact, &keys).unwrap(),
+            &source,
+            &keys,
+        )
+        .unwrap();
+        assert_eq!(expanded["updates"].as_array().unwrap().len(), 1);
+        assert_eq!(expanded["updates"][0]["original"], source[0]);
+        assert_eq!(expanded["updates"][0]["row"]["code"], "00999");
+        assert!(expanded["delete"].as_array().unwrap().is_empty());
+        let delete = json!({"updates":[],"insert":[],"delete":[{"tenant":"001","id":2}]});
+        assert_eq!(
+            expand_plan(delete, &source, &keys).unwrap()["delete"][0],
+            source[1]
+        );
+    }
+
+    #[test]
+    fn compact_tokens_preserve_typed_keys_and_reject_unknown_altered_or_duplicate_identity() {
+        let source = vec![
+            json!({"id":{"$type":"decimal","value":"1.00"},"payload":{"$type":"json","value":null},"data":{"$bytes":"00ff"}}),
+        ];
+        let keys = vec!["id".into()];
+        let initial = compact_document(&source, &keys, Clone::clone).unwrap();
+        assert_eq!(initial["updates"][0]["original"]["id"], source[0]["id"]);
+        let mut edited = initial.clone();
+        edited["updates"][0]["row"]["payload"] = serde_json::Value::Null;
+        let expanded = expand_plan(
+            changed_plan(edited, &initial, &keys).unwrap(),
+            &source,
+            &keys,
+        )
+        .unwrap();
+        assert_eq!(
+            expanded["updates"][0]["original"]["payload"],
+            json!({"$type":"json","value":null})
+        );
+        assert!(expanded["updates"][0]["row"]["payload"].is_null());
+        for token in [
+            json!({"id":{"$type":"decimal","value":"2.00"}}),
+            json!({"id":null}),
+            json!({"id":{"$type":"decimal","value":"1.00"},"extra":"not a key"}),
+        ] {
+            assert!(expand_plan(
+                json!({"updates":[],"insert":[],"delete":[token]}),
+                &source,
+                &keys
+            )
+            .is_err());
+        }
+        let token = initial["updates"][0]["original"].clone();
+        assert!(expand_plan(
+            json!({"updates":[],"insert":[],"delete":[token.clone(),token]}),
+            &source,
+            &keys
+        )
+        .is_err());
+        assert!(
+            compact_document(&[source[0].clone(), source[0].clone()], &keys, Clone::clone).is_err()
+        );
+        assert!(compact_document(&source, &[], Clone::clone).is_err());
+        let mut tampered = initial.clone();
+        tampered["updates"][0]["original"]["extra"] = json!(1);
+        assert!(changed_plan(tampered, &initial, &keys).is_err());
+    }
+
     #[test]
     fn unchanged_rows_skip_normalization_and_duplicates_still_fail() {
         let old = json!({"id":1,"payload":"{\"x\":1}","code":"001"});

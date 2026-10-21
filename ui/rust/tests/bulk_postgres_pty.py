@@ -36,6 +36,8 @@ def main():
     try:
      assert t.wait(lambda:b'alpha'in t.output),'initial PG rows missing';t.send('E');assert t.wait(lambda:nvim_child(t.proc.pid)is not None),'Neovim not launched';child,paths=nvim_child(t.proc.pid);assert len(paths)==2
      assert t.wait(lambda:b'original.json'in t.output and b'edited.json'in t.output),'diff not ready'
+     document=json.loads(paths[0].read_text());assert all(set(entry['original'])=={'id'}for entry in document['updates']),'full original snapshot duplicated in editor file'
+     assert all('payload'in entry['row']for entry in document['updates']),'typed editable rows missing'
      if mode=='signal':os.kill(t.proc.pid,signal.SIGTERM);assert t.wait(lambda:t.proc.poll()is not None),'signal exit timed out'
      else:
       if mode in ['cancel','changed']:t.send(":lua local lines=vim.api.nvim_buf_get_lines(0,0,-1,false);local row=false;for i,l in ipairs(lines)do if l:find('\"row\"')then row=true end;if row and l:find('\"name\": \"alpha\"')then lines[i]=l:gsub('alpha','PG Neovim edited');break end end;vim.api.nvim_buf_set_lines(0,0,-1,false,lines)\r")

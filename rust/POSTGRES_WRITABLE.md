@@ -44,6 +44,12 @@ optional defaults manually if desired. Generated/GENERATED ALWAYS identity value
 must be omitted from inserts; unchanged generated snapshot fields are ignored on
 update, changed generated/ALWAYS fields fail before mutation.
 
+Neovim plans store only complete primary-key tokens in `original` and `delete`;
+full editable values remain in `row`. Immutable full snapshots stay in application
+memory and are restored into actions before validation. Unknown, duplicate or
+modified tokens are rejected. All Rust JSON/CSV/SQL export destinations must be
+new files; existing paths are refused and failed writes clean their partial file.
+
 The native protocol retains the SQLite transport envelope and operation names.
 Atomic batches carry `actions:[{kind:"insert",row:{...}},
 {kind:"update",original:{...},row:{...}},

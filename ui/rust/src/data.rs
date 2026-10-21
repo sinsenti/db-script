@@ -1,6 +1,7 @@
 use crate::bridge::Worker;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Write;
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
@@ -903,6 +904,29 @@ pub fn export(
     p: &Page,
     m: &Meta,
 ) -> Result<()> {
+    if !["json", "csv", "sql"].contains(&format) {
+        return Err("Format must be json/csv/sql".into());
+    }
+    crate::export_file::write_new(path, |file| {
+        write_export(file, format, engine, table, p, m).map_err(std::io::Error::other)
+    })
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "Export destination already exists; choose another filename".into()
+        } else {
+            format!("Could not export: {error}")
+        }
+    })
+}
+
+fn write_export(
+    file: &mut std::fs::File,
+    format: &str,
+    engine: &str,
+    table: &str,
+    p: &Page,
+    m: &Meta,
+) -> Result<()> {
     match format {
         "json" => {
             let rows = p
@@ -920,14 +944,13 @@ pub fn export(
                     row
                 })
                 .collect::<Vec<_>>();
-            std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap())
+            serde_json::to_writer_pretty(&mut *file, &rows)
                 .map_err(|_| "Could not write export file".into())
         }
         "csv" => {
             let mut w = csv::WriterBuilder::new()
                 .terminator(csv::Terminator::CRLF)
-                .from_path(path)
-                .map_err(|_| "Could not open CSV path")?;
+                .from_writer(&mut *file);
             w.write_record(&p.headers).map_err(|_| "CSV write failed")?;
             for row in &p.rows {
                 w.write_record(row.iter().map(|v| {
@@ -996,7 +1019,8 @@ pub fn export(
                     .join(", ");
                 out += &format!("INSERT INTO {target} ({cols}){overriding} VALUES ({values});\n");
             }
-            std::fs::write(path, out).map_err(|_| "Could not write SQL export".into())
+            file.write_all(out.as_bytes())
+                .map_err(|_| "Could not write SQL export".into())
         }
         _ => Err("Format must be json/csv/sql".into()),
     }
@@ -1052,6 +1076,47 @@ pub fn sql_literal(v: &Value, engine: &str, typ: &str) -> Result<String> {
 mod tests {
     use super::*;
     #[test]
+    fn every_export_format_refuses_existing_paths_and_leaves_original_bytes() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let page = Page {
+            headers: vec!["id".into(), "label".into()],
+            rows: vec![vec![json!(1), json!("synthetic")]],
+            ..Page::default()
+        };
+        for format in ["json", "csv", "sql"] {
+            let path = directory.path().join(format!("rows.{format}"));
+            export(&path, format, "sqlite", "items", &page, &Meta::default()).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(
+                export(&path, format, "sqlite", "items", &page, &Meta::default())
+                    .unwrap_err()
+                    .contains("already exists")
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let link = directory.path().join(format!("link.{format}"));
+            symlink(&path, &link).unwrap();
+            assert!(export(&link, format, "sqlite", "items", &page, &Meta::default()).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        let invalid = directory.path().join("invalid.sql");
+        assert!(export(
+            &invalid,
+            "unknown",
+            "sqlite",
+            "items",
+            &page,
+            &Meta::default()
+        )
+        .is_err());
+        assert!(!invalid.exists());
+    }
+
+    #[test]
     fn postgres_sql_export_generated_identity_and_defaults() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("rows.sql");
@@ -1067,6 +1132,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(),
             "INSERT INTO \"public\".\"items\" (\"id\", \"label\") OVERRIDING SYSTEM VALUE VALUES (42, 'it''s fine');\n");
         // JSON/CSV retain all projected columns, including computed ones.
+        std::fs::remove_file(&path).unwrap();
         export(&path, "json", "postgres", "public.items", &p, &m).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("computed"));
         let generated_only = Page {
@@ -1074,6 +1140,7 @@ mod tests {
             rows: vec![vec![json!(6)], vec![json!(8)]],
             ..Page::default()
         };
+        std::fs::remove_file(&path).unwrap();
         export(
             &path,
             "sql",
@@ -1090,11 +1157,13 @@ mod tests {
             rows: vec![vec![json!("text")]],
             ..Page::default()
         };
+        std::fs::remove_file(&path).unwrap();
         export(&path, "sql", "postgres", "public.items", &without_id, &m).unwrap();
         assert!(!std::fs::read_to_string(&path)
             .unwrap()
             .contains("OVERRIDING"));
         let by_default = Meta::default();
+        std::fs::remove_file(&path).unwrap();
         export(&path, "sql", "postgres", "public.items", &p, &by_default).unwrap();
         assert!(!std::fs::read_to_string(&path)
             .unwrap()
@@ -1104,7 +1173,12 @@ mod tests {
             rows: vec![vec![]],
             ..Page::default()
         };
+        std::fs::remove_file(&path).unwrap();
         assert!(export(&path, "sql", "postgres", "public.items", &malformed, &m).is_err());
+        assert!(
+            !path.exists(),
+            "failed export must not leave a partial destination"
+        );
     }
 
     #[test]

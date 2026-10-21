@@ -20,7 +20,7 @@ container credentials. An existing `DBCLI_POSTGRES_URL` also appears in the pick
 No Python PostgreSQL driver or host `psql` is needed for the Rust flow.
 
 Closing the Rust browser returns to the picker; `q` in the picker exits. Sessions
-are writable by default. `E` retains the Neovim diff and confirmation workflow.
+are writable by default. `E` opens a compact Neovim diff and confirms before writing; full conflict snapshots stay in memory. Rust JSON/CSV/SQL exports require a new filename and never overwrite an existing path.
 MySQL entries use the original Python browser and are labeled accordingly.
 
 Build the Rust executables once from this source checkout:

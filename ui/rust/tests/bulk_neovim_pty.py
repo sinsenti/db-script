@@ -62,6 +62,8 @@ def main():
     for p in paths:assert p.stat().st_mode&0o777==0o600
     assert paths[0].parent==paths[1].parent and paths[0].parent.stat().st_mode&0o777==0o700
     assert t.wait(lambda:b'original.json'in t.output and b'edited.json'in t.output),'Neovim diff not displayed'
+    document=json.loads(paths[0].read_text());assert all(set(entry['original'])=={'id'}for entry in document['updates']),'full original snapshot duplicated in editor file'
+    assert all('name'in entry['row']for entry in document['updates']),'editable rows missing'
     proof=folder/"nvim-proof";proof.write_text("");proof.chmod(0o600)
     check="local b=vim.fn.bufnr(vim.fn.argv(0));assert(not vim.bo[b].modifiable and vim.bo[b].readonly);assert(vim.fn.expand('%:t')=='edited.json');assert(not vim.o.backup and not vim.o.writebackup and not vim.bo.swapfile and not vim.bo.undofile and vim.o.shada=='');vim.fn.writefile({'ready'},"+json.dumps(str(proof))+")"
     t.send(':lua '+check+'\r');assert t.wait(lambda:proof.read_text().strip()=='ready'),'diff buffer safety check failed'

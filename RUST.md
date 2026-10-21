@@ -65,7 +65,12 @@ without Python when credentials are already configured:
 `a` inserts, `e` edits one row, and `dd` deletes after confirmation. `E` opens a
 private Neovim diff: original on the left, editable plan on the right. Use `zR`
 to open folds, `:wqa` to return to operation-count confirmation, or `:cq` to cancel.
-Unchanged edits dispatch no writes. Confirmed bulk changes run atomically; omitted
+The editor's `original` fields contain only the complete primary key, for example
+`{"id":1}`; `row` still contains every editable field. Deletions list these same
+key objects explicitly. Keep key tokens unchanged. Full original snapshots stay
+in application memory and are restored into confirmed actions for conflict checks.
+This reduces duplicated JSON in the two diff files, not the 100,000-row in-memory
+bulk limit. Unchanged edits dispatch no writes. Confirmed bulk changes run atomically; omitted
 update entries never imply deletion. Use `DBCLI_BULK_EDITOR='nvim --clean'` for a
 clean Neovim profile. Single-row/filter/SQL editors honor `EDITOR`.
 
@@ -97,6 +102,16 @@ The backend was the fastest measured full-table reader (128.2 ms for 771 quotes)
 and had the lowest measured bulk worker CPU. The full Rust bulk UI still uses more
 memory than the Go/Python UIs; selection does not imply a win on every metric.
 Comparison branches, binaries and reports remain preserved in their worktrees.
+
+## Export destinations
+
+JSON, CSV and SQL exports in both Rust interfaces create new files exclusively,
+with private mode 0600. An existing file, directory or symlink is rejected; choose
+another filename. Ratatui keeps the path prompt open on a collision; the legacy
+interface offers a new export name (empty cancels). Failed writes remove their
+newly created partial file. Existing
+exports are never silently overwritten. This also applies in read-only database
+sessions: exporting creates a local file but does not change the database.
 
 ## PostgreSQL SQL exports
 
@@ -167,3 +182,12 @@ The PostgreSQL checks validate the private descriptor/container marker and creat
 and drop only unique owned fixture schemas. No application database is used.
 `DBCLI_PICKER_PYTHON=/path/to/python` selects the interpreter used by the child
 entry point; by default it is the test interpreter. Missing opt-in flags are skips.
+
+
+Export refusal/retry can be checked in real terminals against temporary SQLite:
+
+```bash
+python3 ui/rust/tests/exports_pty.py rust/target/release/dbcli-rust --kind original
+python3 ui/rust/tests/exports_pty.py ui/rust/target/release/dbcli-ui-rust \
+  --kind ratatui --worker rust/target/release/dbcli-rust
+```

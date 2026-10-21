@@ -1142,18 +1142,40 @@ fn browse_with_filter(
                 } else {
                     format!("{table}_marked")
                 };
-                let path = export(
-                    table,
-                    &prefix,
-                    &hs,
-                    &rs,
-                    &typ,
-                    adapter.is_postgres(),
-                    raw.as_deref(),
-                )
-                .map_err(|e| DbError::adapter(e.to_string()))?;
-                notice(guard, &format!("Exported to {}", path.display()))
-                    .map_err(|e| DbError::adapter(e.to_string()))?;
+                let mut prefix = prefix;
+                loop {
+                    match export(
+                        table,
+                        &prefix,
+                        &hs,
+                        &rs,
+                        &typ,
+                        adapter.is_postgres(),
+                        raw.as_deref(),
+                    ) {
+                        Ok(path) => {
+                            notice(guard, &format!("Exported to {}", path.display()))
+                                .map_err(|e| DbError::adapter(e.to_string()))?;
+                            break;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                            prefix = prompt(
+                                guard,
+                                "File exists. New export name without extension (empty cancels): ",
+                                "",
+                            )
+                            .map_err(|e| DbError::adapter(e.to_string()))?;
+                            if prefix.is_empty() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            notice(guard, &format!("Export failed: {error}"))
+                                .map_err(|e| DbError::adapter(e.to_string()))?;
+                            break;
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -1192,9 +1214,9 @@ fn bulk_edit(
     for row in &source {
         crate::writable::identity(row, &keys).map_err(DbError::adapter)?;
     }
-    let mut template = crate::writable::bulk_template(&source);
-    for pair in template["updates"].as_array_mut().unwrap() {
-        for value in pair["row"].as_object_mut().unwrap().values_mut() {
+    let template = crate::bulk_editor::compact_document(&source, &keys, |row| {
+        let mut row = row.clone();
+        for value in row.as_object_mut().unwrap().values_mut() {
             if let Some(decoded) = value
                 .as_str()
                 .and_then(|text| serde_json::from_str::<Value>(text).ok())
@@ -1203,7 +1225,9 @@ fn bulk_edit(
                 *value = decoded;
             }
         }
-    }
+        row
+    })
+    .map_err(DbError::adapter)?;
     let text =
         serde_json::to_string_pretty(&template).map_err(|e| DbError::adapter(e.to_string()))?;
     let session = crate::bulk_editor::Session::create(&text).map_err(DbError::adapter)?;
@@ -1234,7 +1258,10 @@ fn bulk_edit(
     };
     let edited =
         crate::bulk_editor::changed_plan(edited, &template, &keys).map_err(DbError::adapter)?;
-    let actions = crate::writable::bulk_plan(&source, &edited, &keys).map_err(DbError::adapter)?;
+    let expanded =
+        crate::bulk_editor::expand_plan(edited, &source, &keys).map_err(DbError::adapter)?;
+    let actions =
+        crate::writable::bulk_plan(&source, &expanded, &keys).map_err(DbError::adapter)?;
     if actions.is_empty() {
         notice(guard, "No changes — no writes").map_err(|e| DbError::adapter(e.to_string()))?;
         return Ok(());
@@ -1332,87 +1359,108 @@ fn export(
         _ => "json",
     };
     let path = PathBuf::from(format!("{stem}.{ext}"));
-    if postgres && ext == "sql" {
-        let text = crate::pg_read::Reader::new(crate::pg_read::BlobStyle::Base64)
-            .sql_export(table, headers, rows, raw)
-            .map_err(io::Error::other)?;
-        fs::write(&path, text)?;
-        return Ok(path);
-    }
-
-    match ext {
-        "json" => {
-            let values: Vec<Map<String, Value>> = rows
-                .iter()
-                .map(|r| {
-                    headers
-                        .iter()
-                        .zip(r)
-                        .map(|(h, v)| {
-                            let decoded = if postgres {
-                                crate::pg_read::json_payload(v).clone()
-                            } else {
-                                v.as_str()
-                                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                                    .filter(|v| v.is_object() || v.is_array())
-                                    .unwrap_or_else(|| v.clone())
-                            };
-                            (h.clone(), decoded)
-                        })
-                        .collect()
-                })
-                .collect();
-            fs::write(
-                &path,
-                serde_json::to_vec_pretty(&values).unwrap_or_default(),
-            )?;
+    export_to_path(&path, table, headers, rows, ext, postgres, raw).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Export destination already exists; choose another filename",
+            )
+        } else {
+            error
         }
-        "csv" => {
-            let mut out = String::new();
-            out.push_str(
-                &headers
+    })?;
+    Ok(path)
+}
+
+fn export_to_path(
+    path: &Path,
+    table: &str,
+    headers: &[String],
+    rows: &[Vec<Value>],
+    ext: &str,
+    postgres: bool,
+    raw: Option<&str>,
+) -> io::Result<()> {
+    crate::export_file::write_new(path, |file| {
+        if postgres && ext == "sql" {
+            let text = crate::pg_read::Reader::new(crate::pg_read::BlobStyle::Base64)
+                .sql_export(table, headers, rows, raw)
+                .map_err(io::Error::other)?;
+            file.write_all(text.as_bytes())?;
+            return Ok(());
+        }
+
+        match ext {
+            "json" => {
+                let values: Vec<Map<String, Value>> = rows
                     .iter()
-                    .map(|h| csv_field(h))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            out.push('\n');
-            for row in rows {
+                    .map(|r| {
+                        headers
+                            .iter()
+                            .zip(r)
+                            .map(|(h, v)| {
+                                let decoded = if postgres {
+                                    crate::pg_read::json_payload(v).clone()
+                                } else {
+                                    v.as_str()
+                                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                                        .filter(|v| v.is_object() || v.is_array())
+                                        .unwrap_or_else(|| v.clone())
+                                };
+                                (h.clone(), decoded)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                serde_json::to_writer_pretty(&mut *file, &values).map_err(io::Error::other)?;
+            }
+            "csv" => {
+                let mut out = String::new();
                 out.push_str(
-                    &row.iter()
-                        .map(|v| csv_field(&csv_value(v)))
+                    &headers
+                        .iter()
+                        .map(|h| csv_field(h))
                         .collect::<Vec<_>>()
                         .join(","),
                 );
                 out.push('\n');
+                for row in rows {
+                    out.push_str(
+                        &row.iter()
+                            .map(|v| csv_field(&csv_value(v)))
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                    out.push('\n');
+                }
+                file.write_all(out.as_bytes())?;
             }
-            fs::write(&path, out)?;
-        }
-        _ => {
-            let mut out = String::new();
-            let qh = headers
-                .iter()
-                .map(|h| format!("\"{}\"", h.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            for row in rows {
-                out.push_str(&format!(
-                    "INSERT INTO {} ({qh}) VALUES ({});\n",
-                    table.replace('"', "\"\""),
-                    row.iter()
-                        .map(|v| if v.is_null() {
-                            "NULL".into()
-                        } else {
-                            sql_export_literal(v)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
+            _ => {
+                let mut out = String::new();
+                let qh = headers
+                    .iter()
+                    .map(|h| format!("\"{}\"", h.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for row in rows {
+                    out.push_str(&format!(
+                        "INSERT INTO {} ({qh}) VALUES ({});\n",
+                        table.replace('"', "\"\""),
+                        row.iter()
+                            .map(|v| if v.is_null() {
+                                "NULL".into()
+                            } else {
+                                sql_export_literal(v)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                file.write_all(out.as_bytes())?;
             }
-            fs::write(&path, out)?;
         }
-    }
-    Ok(path)
+        Ok(())
+    })
 }
 fn csv_value(value: &Value) -> String {
     if let Some(text) = crate::pg_read::scalar_text(value) {
@@ -1519,7 +1567,40 @@ pub fn select_database() -> Result<Option<PathBuf>, DbError> {
 #[cfg(test)]
 mod writable_ui_tests {
     use super::*;
+    use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn legacy_exports_refuse_existing_files_for_every_format() {
+        let directory = std::env::temp_dir().join(format!(
+            "dbcli-legacy-export-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let headers = vec!["id".into(), "label".into()];
+        let rows = vec![vec![json!(1), json!("synthetic")]];
+        for format in ["json", "csv", "sql"] {
+            let path = directory.join(format!("rows.{format}"));
+            export_to_path(&path, "items", &headers, &rows, format, false, None).unwrap();
+            let original = fs::read(&path).unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                export_to_path(&path, "items", &headers, &rows, format, false, None)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(fs::read(path).unwrap(), original);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn raw_terminal_lines_reset_columns_once() {
         assert_eq!(terminal_lines("a\nb\r\nc"), "a\r\nb\r\nc");

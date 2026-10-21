@@ -95,6 +95,10 @@ skips separately from passes; an unavailable server can also cause a skip.
   driver or host psql is required. Existing DBCLI_POSTGRES_URL targets are offered
   without displaying credentials or URL options. SQLite manual paths must already
   exist. No recursive home-directory scan is performed.
+- Native Rust exports use exclusive private destinations; existing files/symlinks
+  are rejected, and partial files are removed after failure. Native E files contain
+  PK-only original/delete tokens plus complete editable rows. Full snapshots stay
+  in memory and are expanded into changed actions before transactional validation.
 - The remaining contracts in this section describe the Python reference paths
   (`--python`, `--cli`, or labeled MySQL entries), unless stated otherwise.
 - SQLite targets use `SQLiteAdapter`. Direct PostgreSQL/MySQL URLs prefer native

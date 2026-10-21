@@ -299,15 +299,15 @@ impl App {
         self.input(Edit::Insert, serde_json::to_string_pretty(&row).unwrap());
     }
     fn bulk_editor(&mut self, rows: Vec<Value>) {
-        if rows.iter().any(|r| identity(r, &self.meta.keys).is_err()) {
-            self.status = "Bulk editing requires complete non-NULL primary keys".into();
-            return;
-        }
-        let updates = rows
-            .iter()
-            .map(|r| json!({"original":r,"row":editable(r)}))
-            .collect::<Vec<_>>();
-        self.bulk_external = Some((rows, json!({"updates":updates,"insert":[],"delete":[]})));
+        let document = match crate::bulk_editor::compact_document(&rows, &self.meta.keys, editable)
+        {
+            Ok(document) => document,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        self.bulk_external = Some((rows, document));
         self.modal = None;
         self.status = "Opening Neovim diff; save+exit to review action counts, :cq cancels".into();
     }
@@ -320,7 +320,8 @@ impl App {
         let edited: Value =
             serde_json::from_str(&text).map_err(|_| "Invalid bulk JSON; nothing written")?;
         let changed = crate::bulk_editor::changed_plan(edited, &initial, &self.meta.keys)?;
-        let actions = bulk_actions(&changed, &original, &self.meta, &self.page.headers)?;
+        let expanded = crate::bulk_editor::expand_plan(changed, &original, &self.meta.keys)?;
+        let actions = bulk_actions(&expanded, &original, &self.meta, &self.page.headers)?;
         if actions.is_empty() {
             self.status = "No changes — no writes".into();
             self.modal = None;
@@ -1211,6 +1212,8 @@ mod tests {
         app.bulk_editor(rows.clone());
         assert!(app.modal.is_none());
         let (original, initial) = app.bulk_external.take().unwrap();
+        assert_eq!(initial["updates"][0]["original"], json!({"id":1}));
+        assert_eq!(original, rows);
         app.finish_bulk(original.clone(), initial.clone(), initial.to_string())
             .unwrap();
         assert!(app.modal.is_none());
@@ -1219,7 +1222,11 @@ mod tests {
         changed["updates"][0]["row"]["value"] = json!("private edited value");
         app.finish_bulk(original, initial, changed.to_string())
             .unwrap();
-        assert!(matches!(app.modal, Some(Modal::BulkConfirm { .. })));
+        if let Some(Modal::BulkConfirm { actions, .. }) = &app.modal {
+            assert_eq!(actions[0]["original"], rows[0]);
+        } else {
+            panic!("Missing bulk count confirmation");
+        }
     }
     #[test]
     fn immutable_edit_preview() {

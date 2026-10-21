@@ -389,6 +389,52 @@ mod tests {
         );
     }
     #[test]
+    fn compact_editor_tokens_expand_to_full_conflict_snapshots_before_atomic_apply() {
+        let file = Fixture::new();
+        let mut c = Connection::open(&file.0).unwrap();
+        c.execute_batch("CREATE TABLE t(a TEXT,b INTEGER,v TEXT,PRIMARY KEY(a,b));INSERT INTO t VALUES('001',1,'first'),('001',2,'second');").unwrap();
+        let source = vec![
+            json!({"a":"001","b":1,"v":"first"}),
+            json!({"a":"001","b":2,"v":"second"}),
+        ];
+        let keys = vec!["a".into(), "b".into()];
+        let template = crate::bulk_editor::compact_document(&source, &keys, Clone::clone).unwrap();
+        let edited = json!({"updates":[{"original":{"a":"001","b":1},"row":{"a":"001","b":1,"v":"edited"}}],"delete":[{"a":"001","b":2}],"insert":[{"a":"001","b":3,"v":"third"}]});
+        let changed = crate::bulk_editor::changed_plan(edited, &template, &keys).unwrap();
+        let expanded = crate::bulk_editor::expand_plan(changed, &source, &keys).unwrap();
+        let actions = bulk_plan(&source, &expanded, &keys).unwrap();
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0]["original"], source[0]);
+        // External edits are detected from the full snapshot, not only PK tokens.
+        c.execute("UPDATE t SET v='external' WHERE b=1", [])
+            .unwrap();
+        assert!(apply(&mut c, "t", &actions, bind).is_err());
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            c.query_row("SELECT v FROM t WHERE b=1", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "external"
+        );
+        c.execute("UPDATE t SET v='first' WHERE b=1", []).unwrap();
+        assert_eq!(apply(&mut c, "t", &actions, bind).unwrap(), 3);
+        assert_eq!(
+            c.query_row("SELECT v FROM t WHERE b=1", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "edited"
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM t WHERE b=2", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn original_composite_key_and_concurrency_are_checked() {
         let file = Fixture::new();
         let mut c = Connection::open(&file.0).unwrap();
