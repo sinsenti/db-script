@@ -134,6 +134,11 @@ fixture managed by `tools/postgres_write_fixture.py`; see the backend/UI test do
 
 ## Source selection
 
+The [comparison and outcome](COMPARISON.md) covers the earlier SQLite/native
+experiments, the selection decision and follow-up changes. Full historical
+[quotes and Neovim measurements](docs/comparison/quotes-2026-10-20.md) are preserved
+in this checkout; those tables do not measure the latest main build.
+
 - Backend: `codex_rust_quotes_original`, commit `c51eae7fa2b32a23c84ce64e45fd36ecfaf378ff`.
 - Ratatui: `codex_rust_quotes_neovim`, commit `24fc85ebd8b893ff0b1ac5b1987ba93910e97c80`.
 - Docker connection helper: `codex_codex_quotes_perf`, source commit `908bf7d`.

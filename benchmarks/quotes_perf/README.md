@@ -5,6 +5,11 @@ reference-adapter and helper paths now resolve inside this checkout. No sibling
 worktree, previous virtual environment, stored benchmark result or fixed container
 ID is required. These are development tools; application runtime imports none of them.
 
+For the previous experiment's results and selection decision, see
+[comparison and outcome](../../COMPARISON.md) and the
+[archived quotes report](../../docs/comparison/quotes-2026-10-20.md).
+New runs measure the selected binaries and should not overwrite historical tables.
+
 ## Setup
 
 Run from the repository root on Linux (POSIX PTYs and Linux `/proc` are used):

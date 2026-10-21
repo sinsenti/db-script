@@ -55,6 +55,14 @@ available. `--cli` selects the original Python interface with the `psql`/`mysql`
 fallback. Legacy Docker paths retain their `docker exec` implementation and do not
 require published host ports.
 
+## Comparison and outcome
+
+See [the Python/Go/Rust comparison](COMPARISON.md) for the experiments, measured
+results, why Original Rust was selected, and what reached main. The
+[historical quotes/Neovim tables](docs/comparison/quotes-2026-10-20.md) retain all
+variants and measurement caveats. [Performance tools](benchmarks/quotes_perf/README.md)
+can measure current builds; the historical numbers predate later main changes.
+
 ## Checks
 
 ```sh

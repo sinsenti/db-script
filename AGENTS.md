@@ -81,6 +81,7 @@ skips separately from passes; an unavailable server can also cause a skip.
 | `dbcli/discovery.py` | Shallow current-directory SQLite signature detection and injectable Docker discovery. |
 | `dbcli/legacy.py` | Subprocess-backed direct/Docker PostgreSQL/MySQL paths and the index/constraint/trigger inspector. |
 | `tests/` | SQLite fixtures, native-adapter fakes, helper/module tests and opt-in live adapter tests. |
+| `COMPARISON.md`, `docs/comparison/` | Historical Python/Go/Rust results, source provenance and the main selection decision; timings apply to pinned builds, not automatically to current main. |
 | `todo.md` | Broad development roadmap; checkbox status can lag behind the code. |
 
 ## Connection flow and contracts
