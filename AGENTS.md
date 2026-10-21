@@ -181,6 +181,11 @@ Grid `/` has cursor-local column/predicate/cached-scalar suggestions, selected
 with arrows and accepted with Tab; Enter submits text, and Esc hides the list
 before closing the prompt. Completion is event-driven and must never query the
 DB while typing/rendering. Sidebar `/` remains table-name search.
+JSON path candidates are discovered once per loaded page with strict text/node,
+row/column/depth/array limits; see ui/rust/README.md. Tab expands observed dotted
+labels into guarded SQLite json_extract or native PostgreSQL #>> expressions.
+Keep scalar quoting consistent with extraction types (PostgreSQL #>> is text),
+and preserve the surrounding predicate when completing at the cursor.
 Rust lowercase `e` opens the current row directly in the external editor, then
 uses explicit review/confirmation; cancel/no-op paths never write. Preserve exact
 original storage for untouched fields and keep the full immutable snapshot/PK.

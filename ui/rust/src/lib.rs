@@ -8,3 +8,5 @@ pub mod bulk_editor;
 pub mod export_file;
 
 pub mod filter_completion;
+
+pub mod json_completion;

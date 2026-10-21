@@ -89,6 +89,11 @@ Tab to accept, and Enter to submit the filter as typed. Esc hides suggestions
 before closing the prompt; Tab reopens them. Completion respects the cursor and
 preserves surrounding clauses. Values come only from the loaded page; no table
 scan or extra query runs while typing. Sidebar `/` remains table-name search.
+JSON columns also suggest observed nested keys/array paths: type `payload.` and
+accept a path with Tab to insert SQLite `json_extract` or PostgreSQL `#>>` SQL.
+The path shorthand must be completed before submission. PostgreSQL extraction
+returns text; cast explicitly for numeric comparisons. Empty/unseen keys and
+oversized JSON documents are outside the bounded discovery sample.
 See [the UI guide](ui/rust/README.md#filter-suggestions) for examples and limits.
 
 ## Cancelling reads and worker limits

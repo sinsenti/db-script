@@ -112,9 +112,40 @@ without accepting a suggestion retains the existing plain-text search / SQL
 predicate behavior. Sidebar `/` continues to search table names separately.
 
 Suggestions use metadata and at most the first 50 loaded rows, with at most 40
-items and short scalar values only. They do not fetch more rows, scan the table,
+items. Scalar value suggestions are short values only. They do not fetch more rows, scan the table,
 or run SQL while typing/rendering. Values missing from the current page must be
 typed manually. This is contextual completion, not a complete SQL parser.
+
+### JSON keys and paths
+
+The same suggestion list includes JSON paths discovered from the loaded page.
+Type a JSON column followed by `.`, such as `extended_properties_json.`, select
+an observed nested key or array path, and press Tab. Quoted column prefixes such
+as `"payload".` also work. A path like `payload.customer.name` or
+`payload.items[0].code` is a completion label; Tab replaces it with executable SQL.
+The shorthand itself is not a new filter language: accept the suggestion before
+submitting. The next suggestions offer predicates and observed scalar values for
+that specific path. Surrounding filter clauses and cursor-local editing remain
+supported.
+
+SQLite JSON stored as TEXT uses a guarded `json_extract` expression, so malformed
+JSON in other rows is ignored by that extraction. PostgreSQL native JSON/JSONB
+uses `#>> ARRAY[...]` with quoted keys and array indexes. This extracts **text**:
+its numeric/boolean value suggestions are quoted text, and numeric comparisons
+require an explicit cast. A missing path and a JSON null both extract SQL NULL;
+use `IS NULL`, or write a type/existence expression to distinguish them. SQL syntax:
+[SQLite JSON functions](https://www.sqlite.org/json1.html) and
+[PostgreSQL JSON operators](https://www.postgresql.org/docs/16/functions-json.html).
+
+Discovery is cached when a page loads, not repeated on each keystroke. It samples
+at most 50 rows / 64 columns, five path segments, 32 children per object and the
+first eight elements per array, retaining at most 128 paths and 12 short values
+per path. SQLite parsing skips documents over 64 KiB and stops after 256 KiB of
+JSON text; traversal has a 2,048-node budget. Empty/unseen keys cannot be suggested.
+SQLite keys containing double quotes, backslashes or control characters are not
+offered because their path escaping is ambiguous; enter a suitable expression
+manually. PostgreSQL TEXT and native JSON-array columns are outside native
+JSON/JSONB path discovery. No additional database reads are issued for discovery.
 
 ## Direct single-row editing
 
@@ -299,6 +330,8 @@ part of this contract. Completion is contextual, not a complete SQL grammar.
   composition, typed values, atomic plan validation and JSON/CSV/SQL exports.
 - `app.rs`: event-driven state, nested browser stack, modals, drafts, marks and
   confirmation. Raw snapshots remain separate from editable JSON.
+- `json_completion.rs`: bounded nested-key/array discovery when a page loads,
+  engine-specific JSON path expressions and cached scalar values.
 - `filter_completion.rs`: cursor-local token completion from cached metadata/rows,
   bounded suggestions and identifier/value quoting; no database access.
 - `view.rs`: pure Ratatui widgets, responsive column viewport and Unicode text.

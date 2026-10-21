@@ -45,13 +45,34 @@ struct Token {
     end: usize,
     text: String,
     quote: Option<char>,
+    json: Option<usize>,
 }
-fn tokens(chars: &[char]) -> Vec<Token> {
+fn tokens(chars: &[char], json: &[crate::json_completion::Field]) -> Vec<Token> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i].is_whitespace() {
             i += 1;
+            continue;
+        }
+        if let Some((index, field)) = json.iter().enumerate().find(|(_, field)| {
+            chars[i] == '('
+                && chars[i..]
+                    .iter()
+                    .copied()
+                    .zip(field.expression.chars())
+                    .all(|(a, b)| a == b)
+                && chars.len() - i >= field.expression.chars().count()
+        }) {
+            let end = i + field.expression.chars().count();
+            out.push(Token {
+                start: i,
+                end,
+                text: field.label.clone(),
+                quote: None,
+                json: Some(index),
+            });
+            i = end;
             continue;
         }
         let start = i;
@@ -83,6 +104,7 @@ fn tokens(chars: &[char]) -> Vec<Token> {
             end: i,
             text: chars[start..i].iter().collect(),
             quote,
+            json: None,
         });
     }
     out
@@ -97,7 +119,7 @@ fn unquote(value: &str, quote: Option<char>) -> String {
     }
 }
 fn identifier(token: &Token, headers: &[String]) -> Option<String> {
-    if token.quote == Some('\'') {
+    if token.json.is_some() || token.quote == Some('\'') {
         return None;
     }
     let name = unquote(&token.text, token.quote);
@@ -110,10 +132,17 @@ fn matches_prefix(prefix: &str, candidate: &str) -> bool {
     candidate.to_lowercase().starts_with(&prefix.to_lowercase())
 }
 
-pub fn suggest(text: &str, cursor: usize, page: &Page, meta: &Meta, engine: &str) -> Suggestions {
+pub fn suggest(
+    text: &str,
+    cursor: usize,
+    page: &Page,
+    meta: &Meta,
+    engine: &str,
+    json: &[crate::json_completion::Field],
+) -> Suggestions {
     let chars: Vec<_> = text.chars().collect();
     let cursor = cursor.min(chars.len());
-    let tokens = tokens(&chars);
+    let tokens = tokens(&chars, json);
     let current = tokens.iter().find(|t| t.start <= cursor && cursor <= t.end);
     let (start, end, prefix, quote) = if let Some(t) = current {
         (
@@ -142,6 +171,12 @@ pub fn suggest(text: &str, cursor: usize, page: &Page, meta: &Meta, engine: &str
             .any(|op| t.text.eq_ignore_ascii_case(op))
     };
     let column_at_end = last.and_then(|t| identifier(t, &headers));
+    let json_at_end = last.and_then(|t| t.json);
+    let json_for_value = before.iter().rev().find_map(|t| t.json);
+    let json_prefix = last
+        .and_then(|t| identifier(t, &headers))
+        .filter(|_| prefix.starts_with(['.', '[']));
+
     let column_for_value = before.iter().rev().find_map(|t| identifier(t, &headers));
     let after_is = last.is_some_and(|t| is_word(t, "IS"));
     let after_is_not = last.is_some_and(|t| is_word(t, "NOT"))
@@ -164,7 +199,11 @@ pub fn suggest(text: &str, cursor: usize, page: &Page, meta: &Meta, engine: &str
             !expecting_value && (is_word(t, "AND") || is_word(t, "OR") || t.text == "(")
         });
     let mut out = Suggestions {
-        start,
+        start: if json_prefix.is_some() {
+            last.unwrap().start
+        } else {
+            start
+        },
         end,
         ..Suggestions::default()
     };
@@ -195,6 +234,20 @@ pub fn suggest(text: &str, cursor: usize, page: &Page, meta: &Meta, engine: &str
             }
         }
     }
+    if (expecting_column || json_prefix.is_some()) && quote != Some('\'') {
+        let path_prefix = if let Some(column) = &json_prefix {
+            format!("{column}{prefix}")
+        } else {
+            unquote(&prefix, quote)
+        };
+        for field in json {
+            if matches_prefix(&path_prefix, &field.label)
+                || matches_prefix(&prefix, &field.expression)
+            {
+                push(field.label.clone(), spaced(&field.expression), "JSON path");
+            }
+        }
+    }
     // Single-word plain searches can also complete cached text without turning
     // them into SQL literals or expressions. Predicate completion stays separate.
     if before.is_empty() && quote.is_none() && !chars.iter().any(|c| c.is_whitespace()) {
@@ -220,7 +273,7 @@ pub fn suggest(text: &str, cursor: usize, page: &Page, meta: &Meta, engine: &str
                 push(op.into(), spaced(op), "predicate");
             }
         }
-    } else if column_at_end.is_some() && quote.is_none() {
+    } else if (column_at_end.is_some() || json_at_end.is_some()) && quote.is_none() {
         let mut operators = vec![
             "=",
             "!=",
@@ -245,9 +298,20 @@ pub fn suggest(text: &str, cursor: usize, page: &Page, meta: &Meta, engine: &str
         }
     } else if expecting_value {
         let needle = unquote(&prefix, quote);
+        if !after_is && !after_is_not {
+            if let Some(index) = json_for_value {
+                for value in &json[index].values {
+                    if matches_prefix(&needle, &data::text(value)) {
+                        if let Ok(literal) = data::sql_literal(value, engine, "") {
+                            push(literal.clone(), spaced(&literal), "JSON value");
+                        }
+                    }
+                }
+            }
+        }
         if let Some(column) = column_for_value
             .as_ref()
-            .filter(|_| !after_is && !after_is_not)
+            .filter(|_| !after_is && !after_is_not && json_for_value.is_none())
         {
             if let Some(index) = page.headers.iter().position(|h| h == column) {
                 for row in page.rows.iter().take(50) {

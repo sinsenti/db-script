@@ -97,6 +97,7 @@ pub struct App {
     pub external: bool,
     pub external_review: bool,
     pub filter_suggestions: Option<crate::filter_completion::Suggestions>,
+    pub json_fields: Vec<crate::json_completion::Field>,
     pub bulk_external: Option<(Vec<Value>, Value)>,
     pub width: u16,
     pub height: u16,
@@ -138,6 +139,7 @@ impl App {
             external: false,
             external_review: false,
             filter_suggestions: None,
+            json_fields: vec![],
             bulk_external: None,
             width: 120,
             height: 35,
@@ -224,6 +226,7 @@ impl App {
             .unwrap_or(self.table_cursor);
         self.spec = spec.clone();
         self.page = Page::default();
+        self.json_fields.clear();
         self.submit(Job::Load(spec), db);
     }
     pub fn receive(&mut self, completion: Completion, db: &Async) {
@@ -256,6 +259,8 @@ impl App {
                 self.spec = b.spec;
                 self.page = b.page;
                 self.meta = b.meta;
+                self.json_fields =
+                    crate::json_completion::discover(&self.page, &self.meta, &self.config.engine);
                 self.total = b.total;
                 self.cursor = self.cursor.min(self.page.rows.len().saturating_sub(1));
                 self.status = format!("{} rows · {} marked", self.total, self.marks.len());
@@ -321,6 +326,7 @@ impl App {
                     &self.page,
                     &self.meta,
                     &self.config.engine,
+                    &self.json_fields,
                 );
                 (!suggestions.items.is_empty()).then_some(suggestions)
             }
@@ -956,6 +962,7 @@ impl App {
                     &self.page,
                     &self.meta,
                     &self.config.engine,
+                    &self.json_fields,
                 );
                 self.filter_suggestions = (!suggestions.items.is_empty()).then_some(suggestions);
                 self.modal = Some(modal);
@@ -1384,7 +1391,7 @@ SEARCH & QUERY
 Ctrl+R\tRun SQL or accept JSON in an editor
 Ctrl+G\tOpen the active prompt in your external editor
 Tab (filter)\tAccept a suggestion; reopen hidden suggestions
-↑/↓ (filter)\tChoose a column, predicate or cached value
+↑/↓ (filter)\tChoose a column, JSON path, predicate or value
 Esc (filter)\tHide suggestions first, then close the prompt
 Tab (editor)\tComplete columns, tables or SQL keywords
 o/O\tToggle ascending / descending sort
