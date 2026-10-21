@@ -165,6 +165,8 @@ skips separately from passes; an unavailable server can also cause a skip.
 ## Python reference UI behavior and known gaps
 
 For the default Rust interface use `ui/rust/README.md` and `RUST.md`.
+Its `?` guide has one shortcut/group per row; schema/inspector tables keep headers
+visible while scrolling entries and wrap values within aligned cells.
 
 Use `dbcli/ui.py` as the source of truth for keybindings, not older planning notes.
 

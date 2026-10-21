@@ -36,6 +36,9 @@ pub enum Edit {
 }
 #[derive(Clone, Debug)]
 pub enum Modal {
+    Help {
+        scroll: usize,
+    },
     Text {
         title: String,
         text: String,
@@ -578,12 +581,7 @@ impl App {
             return;
         }
         if key.code == K::Char('?') {
-            self.modal = Some(Modal::Text {
-                title: "Keyboard help".into(),
-                text: HELP.into(),
-                scroll: 0,
-                detail: false,
-            });
+            self.modal = Some(Modal::Help { scroll: 0 });
             return;
         }
         if key.code == K::Tab {
@@ -670,10 +668,30 @@ impl App {
             return;
         }
         if self.view == View::Schema || self.view == View::Inspect {
+            let rows = if self.view == View::Schema {
+                self.meta.schema.rows.len()
+            } else {
+                self.inspector.rows.len()
+            };
+            let last = rows.saturating_sub(1).min(u16::MAX as usize) as u16;
+            let step = self.height.saturating_sub(12).max(1);
             match key.code {
-                K::Char('j') | K::Down => self.scroll = self.scroll.saturating_add(1),
+                K::Char('j') | K::Down => self.scroll = self.scroll.saturating_add(1).min(last),
                 K::Char('k') | K::Up => self.scroll = self.scroll.saturating_sub(1),
-                _ => {}
+                K::Char('d') if ctrl => self.scroll = self.scroll.saturating_add(step).min(last),
+                K::Char('u') if ctrl => self.scroll = self.scroll.saturating_sub(step),
+                K::Char('g') if !ctrl => self.scroll = 0,
+                K::Home => self.scroll = 0,
+                K::Char('G') | K::End => self.scroll = last,
+                _ => { /* View switches and other commands are handled below. */ }
+            }
+            if matches!(
+                key.code,
+                K::Char('j' | 'k' | 'G') | K::Down | K::Up | K::Home | K::End
+            ) || !ctrl && key.code == K::Char('g')
+                || ctrl && matches!(key.code, K::Char('d' | 'u'))
+            {
+                return;
             }
         }
         let previous = self.last.take();
@@ -902,6 +920,21 @@ impl App {
             return;
         }
         match &mut modal {
+            Modal::Help { scroll } => {
+                let (count, visible) = crate::view::help_dimensions(self.width, self.height);
+                let last = count.saturating_sub(visible);
+                let step = visible.saturating_sub(1).max(1);
+                match key.code {
+                    K::Char('q') | K::Char('h') => return,
+                    K::Char('j') | K::Down => *scroll = scroll.saturating_add(1).min(last),
+                    K::Char('k') | K::Up => *scroll = scroll.saturating_sub(1),
+                    K::Char('d') if ctrl => *scroll = scroll.saturating_add(step).min(last),
+                    K::Char('u') if ctrl => *scroll = scroll.saturating_sub(step),
+                    K::Char('g') | K::Home => *scroll = 0,
+                    K::Char('G') | K::End => *scroll = last,
+                    _ => {}
+                }
+            }
             Modal::Text { scroll, detail, .. } => match key.code {
                 K::Char('q') | K::Char('h') => return,
                 K::Char('j') | K::Down => *scroll = scroll.saturating_add(1),
@@ -1164,7 +1197,7 @@ impl App {
                         action = matching[0].to_string();
                     }
                 }
-                match action.as_str(){"help"=>self.modal=Some(Modal::Text{title:"Keyboard help".into(),text:HELP.into(),scroll:0,detail:false}),"data"=>self.view=View::Data,"sql"=>self.input(Edit::Sql,self.draft.clone()),"schema"=>self.view=View::Schema,"inspect"=>self.submit(Job::Inspect(self.spec.table.clone()),db),"filter"=>self.input(Edit::Filter,self.spec.filter.clone()),"insert"=>self.insert(),"edit"=>self.edit(),"bulk"=>self.bulk(db),"delete"=>self.delete(),"export"=>self.export("json".into(),db),"tables"=>self.focus=Focus::Sidebar,"refresh"=>self.refresh(db),"quit"=>self.quit=true,_=>return Err("Commands: data sql schema inspect filter insert edit bulk delete export tables refresh quit".into())}
+                match action.as_str(){"help"=>self.modal=Some(Modal::Help{scroll:0}),"data"=>self.view=View::Data,"sql"=>self.input(Edit::Sql,self.draft.clone()),"schema"=>self.view=View::Schema,"inspect"=>self.submit(Job::Inspect(self.spec.table.clone()),db),"filter"=>self.input(Edit::Filter,self.spec.filter.clone()),"insert"=>self.insert(),"edit"=>self.edit(),"bulk"=>self.bulk(db),"delete"=>self.delete(),"export"=>self.export("json".into(),db),"tables"=>self.focus=Focus::Sidebar,"refresh"=>self.refresh(db),"quit"=>self.quit=true,_=>return Err("Commands: data sql schema inspect filter insert edit bulk delete export tables refresh quit".into())}
             }
         }
         Ok(())
@@ -1222,7 +1255,64 @@ pub const COMMANDS: [&str; 14] = [
     "tables", "refresh", "quit", "help",
 ];
 
-pub const HELP:&str="NAVIGATION\nj/k or arrows: rows · H/L: columns · Enter/l: full row detail\ngg/G: first/last · Ctrl+D/U: page · Tab: sidebar/grid/tabs\nh/q: back or quit · Esc: cancel modal/read · Ctrl+C: quit\n\nREADS\nEsc: stop pending read without closing browser; newer reads supersede old results\n/: filter · :: SQL editor · Ctrl+R: run SQL / accept JSON\nCtrl+G: external editor · Tab in editor: completion\no/O: sort ASC/DESC · v: visibility · Space: stable marks\nf: grouped FK chooser · S: schema · I: indexes/constraints/triggers\nx: JSON export · X: JSON/CSV/SQL format menu\nExports: marked rows or up to 100000 filtered/sorted rows\n\nWRITES (SQLite/PostgreSQL writable screens)\na: insert object or array · e: edit current original row\nE: Neovim diff for explicit atomic updates/insert/delete; :wqa then count confirmation, :cq cancels\ndd: delete current/marked rows · Ctrl+R: review JSON edits\nPreview: j/k/Ctrl+D/U/G scroll full diff · y: confirm\nDeletion preview: type DELETE then y · Esc/q cancels\n\nCtrl+P command palette: data sql schema inspect filter insert\nedit bulk delete export tables refresh quit\n\nPostgreSQL raw queries use server-read-only transactions; --read-only disables all mutations.";
+// One shortcut (or related key group) per row; tabs separate keys and descriptions.
+pub const HELP: &str = "NAVIGATION
+j/k ↑/↓\tMove through rows, menus or help
+H/L ←/→\tFocus a data column
+gg/G\tJump to the first / last row
+Ctrl+D/U\tPage down / up
+Enter/l\tOpen row details or choose an item
+Tab\tCycle sidebar, grid and view tabs
+1/2/3/4\tShow Data / SQL / Schema / Inspect
+h/q\tGo back or quit
+Esc\tClose a modal, or cancel a pending read
+Ctrl+C\tForce quit; a write outcome may be unknown
+
+SEARCH & QUERY
+/\tFilter rows; search tables in the sidebar
+: or 2\tOpen the multiline SQL editor
+Ctrl+R\tRun SQL or accept JSON in an editor
+Ctrl+G\tOpen the active prompt in your external editor
+Tab (editor)\tComplete columns, tables or SQL keywords
+o/O\tToggle ascending / descending sort
+v\tChoose visible columns
+Space\tMark or unmark a complete row
+f\tChoose a foreign-key relation to follow
+S/3\tShow the full table schema
+I/4\tInspect indexes, constraints and triggers
+
+EXPORT
+x\tExport JSON
+X\tChoose JSON, CSV or SQL export
+
+WRITES · WRITABLE TABLES ONLY
+a\tInsert a JSON object or array
+e\tEdit the current row
+E\tOpen bulk edits as a private Neovim diff
+dd\tReview deletion of current or marked rows
+y (review)\tConfirm one atomic transaction
+DELETE then y\tAcknowledge and confirm explicit deletions
+Esc/q (review)\tCancel without applying the plan
+
+NEOVIM BULK DIFF
+:wqa\tSave and return to operation-count confirmation
+:cq\tCancel bulk editing
+]c/[c\tJump to the next / previous change
+zR\tExpand all diff folds
+
+HELP & COMMANDS
+?\tOpen this keyboard guide
+Ctrl+P\tOpen the command palette
+j/k ↑/↓\tScroll this guide one line
+Ctrl+D/U\tScroll this guide one page
+g/G\tJump to the start / end of this guide
+Esc/q\tClose this guide
+
+Read operations can be cancelled; a newer submitted query supersedes an older read.
+Confirmed writes cannot be cancelled or superseded.
+Exports use marked rows, or at most 100,000 matching rows, and require a new filename.
+Raw SQL screens are read only; --read-only disables all mutations.
+";
 #[cfg(test)]
 mod tests {
     use super::*;

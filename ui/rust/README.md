@@ -45,6 +45,14 @@ while a worker is waiting on a read or protocol response. During a pending write
 q waits for the transaction result; forced Ctrl+C/signal exit reports an unknown
 outcome rather than claiming rollback.
 
+`?` opens a sectioned keyboard guide with one shortcut or related key group per
+line, aligned descriptions and a scroll position indicator. Use j/k, Ctrl+D/U or
+g/G to move through it; Esc/q closes it.
+
+Schema and inspector results use aligned, Unicode-aware table columns, alternating
+row shading and a fixed header. Long values wrap inside their own cells. Use j/k
+to scroll entries, Ctrl+D/U to page, and g/G to jump to the first/last entry.
+
 | Control | Action |
 | --- | --- |
 | Tab | Cycle grid, view tabs, sidebar focus |

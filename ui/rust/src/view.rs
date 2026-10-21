@@ -261,19 +261,232 @@ fn column_width(a: &App, h: &str) -> usize {
         .clamp(10, 32)
 }
 fn result(f: &mut Frame, p: &Page, title: &str, scroll: u16, area: Rect) {
-    let mut lines = vec![
-        p.headers.join("  │  "),
-        "─".repeat(area.width.saturating_sub(3) as usize),
-    ];
-    for row in &p.rows {
-        lines.push(row.iter().map(text).collect::<Vec<_>>().join("  │  "));
+    let border = block(title.to_string(), true).padding(Padding::horizontal(1));
+    let inner = border.inner(area);
+    if p.headers.is_empty() || inner.width == 0 {
+        f.render_widget(Paragraph::new("No metadata available").block(border), area);
+        return;
     }
+    let headers = p
+        .headers
+        .iter()
+        .map(|h| match h.as_str() {
+            "Column Name" => "Column".to_string(),
+            "NotNull" => "Not null".to_string(),
+            _ => h.clone(),
+        })
+        .collect::<Vec<_>>();
+    let spacing = if inner.width >= 75 { 2 } else { 1 };
+    let budget = (inner.width as usize).saturating_sub(spacing * headers.len().saturating_sub(1));
+    let natural = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let value_width = p
+                .rows
+                .iter()
+                .filter_map(|r| r.get(i))
+                .map(|v| {
+                    let value = text(v);
+                    value.lines().map(UnicodeWidthStr::width).max().unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+            UnicodeWidthStr::width(h.as_str())
+                .max(value_width)
+                .clamp(1, 48)
+        })
+        .collect::<Vec<_>>();
+    let mut widths = headers
+        .iter()
+        .map(|h| UnicodeWidthStr::width(h.as_str()).clamp(1, 12))
+        .collect::<Vec<_>>();
+    // Prefer readable headers, then share remaining space between values that need it.
+    while widths.iter().sum::<usize>() > budget {
+        let Some((i, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > 1)
+            .max_by_key(|(_, w)| **w)
+        else {
+            break;
+        };
+        widths[i] -= 1;
+    }
+    let mut spare = budget.saturating_sub(widths.iter().sum());
+    while spare > 0 {
+        let mut changed = false;
+        for (i, width) in widths.iter_mut().enumerate() {
+            if *width < natural[i] && spare > 0 {
+                *width += 1;
+                spare -= 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let header_cells = headers
+        .iter()
+        .zip(&widths)
+        .map(|(h, w)| {
+            let lines = wrapped_lines(h, *w);
+            Cell::from(Text::from(
+                lines.into_iter().map(Line::from).collect::<Vec<_>>(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let header_height = headers
+        .iter()
+        .zip(&widths)
+        .map(|(h, w)| wrapped_lines(h, *w).len())
+        .max()
+        .unwrap_or(1) as u16;
+    let start = (scroll as usize).min(p.rows.len().saturating_sub(1));
+    let rows = p
+        .rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(inner.height as usize)
+        .map(|(n, row)| {
+            let mut height = 1;
+            let cells = p
+                .headers
+                .iter()
+                .enumerate()
+                .zip(&widths)
+                .map(|((i, h), width)| {
+                    let value = row
+                        .get(i)
+                        .map(text)
+                        .unwrap_or_default()
+                        .replace('\t', "  ")
+                        .replace('\r', "");
+                    let lines = wrapped_lines(&value, *width);
+                    height = height.max(lines.len().min(u16::MAX as usize) as u16);
+                    let alignment = if h == "CID" {
+                        Alignment::Right
+                    } else if h == "PK" || h == "NotNull" {
+                        Alignment::Center
+                    } else {
+                        Alignment::Left
+                    };
+                    let style = match value.as_str() {
+                        "YES" => Style::default().fg(ACCENT),
+                        "NO" | "NULL" => Style::default().fg(MUTED),
+                        _ => Style::default().fg(Color::Gray),
+                    };
+                    Cell::from(
+                        Text::from(lines.into_iter().map(Line::from).collect::<Vec<_>>())
+                            .alignment(alignment),
+                    )
+                    .style(style)
+                })
+                .collect::<Vec<_>>();
+            Row::new(cells)
+                .height(height)
+                .style(Style::default().bg(if n % 2 == 0 {
+                    PANEL
+                } else {
+                    Color::Rgb(19, 29, 43)
+                }))
+        });
+    let border = border.title_bottom(Line::styled(
+        format!(" {} entries · j/k scroll ", p.rows.len()),
+        Style::default().fg(MUTED),
+    ));
     f.render_widget(
-        Paragraph::new(lines.join("\n"))
-            .block(block(title.to_string(), true))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
+        Table::new(rows, widths.iter().map(|w| Constraint::Length(*w as u16)))
+            .header(
+                Row::new(header_cells)
+                    .height(header_height)
+                    .bottom_margin(1)
+                    .style(Style::default().fg(ACCENT).bold()),
+            )
+            .column_spacing(spacing as u16)
+            .block(border),
         area,
+    );
+}
+
+fn help_rect(area: Rect) -> Rect {
+    centered(
+        area,
+        area.width.saturating_sub(8).min(100),
+        area.height.saturating_sub(4),
+    )
+}
+fn help_lines(width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let key_width = 16.min(width.saturating_sub(8)).max(1);
+    let description_width = width.saturating_sub(key_width + 2).max(1);
+    let mut lines = Vec::new();
+    for line in HELP.lines() {
+        if let Some((key, description)) = line.split_once('\t') {
+            let keys = wrapped_lines(key, key_width);
+            let descriptions = wrapped_lines(description, description_width);
+            for n in 0..keys.len().max(descriptions.len()) {
+                let key = keys.get(n).cloned().unwrap_or_default();
+                let padding =
+                    " ".repeat(key_width.saturating_sub(UnicodeWidthStr::width(key.as_str())) + 2);
+                lines.push(Line::from(vec![
+                    Span::styled(key, Style::default().fg(Color::Rgb(244, 203, 126)).bold()),
+                    Span::raw(padding),
+                    Span::styled(
+                        descriptions.get(n).cloned().unwrap_or_default(),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
+            }
+        } else if line.is_empty() {
+            lines.push(Line::raw(""));
+        } else if line == line.to_uppercase() {
+            lines.extend(
+                wrapped_lines(line, width)
+                    .into_iter()
+                    .map(|l| Line::styled(l, Style::default().fg(ACCENT).bold())),
+            );
+        } else {
+            lines.extend(
+                wrapped_lines(line, width)
+                    .into_iter()
+                    .map(|l| Line::styled(l, Style::default().fg(MUTED))),
+            );
+        }
+    }
+    lines
+}
+pub fn help_dimensions(width: u16, height: u16) -> (usize, usize) {
+    let rect = help_rect(Rect::new(0, 0, width, height));
+    (
+        help_lines(rect.width.saturating_sub(4) as usize).len(),
+        rect.height.saturating_sub(2) as usize,
+    )
+}
+fn help(f: &mut Frame, area: Rect, scroll: usize) {
+    let rect = help_rect(area);
+    let border = block(" Keyboard shortcuts ", true).padding(Padding::horizontal(1));
+    let lines = help_lines(border.inner(rect).width as usize);
+    let visible = border.inner(rect).height as usize;
+    let scroll = scroll.min(lines.len().saturating_sub(visible));
+    let end = (scroll + visible).min(lines.len());
+    let border = border.title_bottom(Line::styled(
+        format!(" {}–{} / {} · Esc to close ", scroll + 1, end, lines.len()),
+        Style::default().fg(MUTED),
+    ));
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(scroll)
+                .take(visible)
+                .collect::<Vec<_>>(),
+        )
+        .block(border),
+        rect,
     );
 }
 pub fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
@@ -298,6 +511,10 @@ pub fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
 }
 
 fn modal(f: &mut Frame, a: &App, m: &Modal, area: Rect) {
+    if let Modal::Help { scroll } = m {
+        help(f, area, *scroll);
+        return;
+    }
     let rect = if matches!(m, Modal::BulkConfirm { .. }) {
         centered(area, area.width.saturating_sub(8).min(90), 8)
     } else {
@@ -309,6 +526,7 @@ fn modal(f: &mut Frame, a: &App, m: &Modal, area: Rect) {
     };
     f.render_widget(Clear, rect);
     match m {
+        Modal::Help { .. } => unreachable!("help is rendered separately"),
         Modal::Text {
             title,
             text,
