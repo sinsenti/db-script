@@ -1068,6 +1068,20 @@ impl App {
                             chars.drain(*cursor..end);
                             *text = chars.into_iter().collect();
                         }
+                        K::Char('w') if ctrl => {
+                            let mut chars = text.chars().collect::<Vec<_>>();
+                            let end = (*cursor).min(chars.len());
+                            let mut start = end;
+                            while start > 0 && chars[start - 1].is_whitespace() {
+                                start -= 1;
+                            }
+                            while start > 0 && !chars[start - 1].is_whitespace() {
+                                start -= 1;
+                            }
+                            chars.drain(start..end);
+                            *cursor = start;
+                            *text = chars.into_iter().collect();
+                        }
                         K::Backspace => {
                             if *cursor > 0 {
                                 let mut chars = text.chars().collect::<Vec<_>>();
@@ -1280,6 +1294,14 @@ Space\tMark or unmark a complete row
 f\tChoose a foreign-key relation to follow
 S/3\tShow the full table schema
 I/4\tInspect indexes, constraints and triggers
+
+TEXT EDITING
+Ctrl+W\tDelete the preceding word and whitespace
+Ctrl+A/E\tMove to the start / end of the line
+Ctrl+K\tDelete from the cursor to the end of the line
+Ctrl+U\tClear the prompt or editor
+Backspace\tDelete the character before the cursor
+Delete\tDelete the character after the cursor
 
 EXPORT
 x\tExport JSON

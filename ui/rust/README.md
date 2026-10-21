@@ -79,7 +79,9 @@ to scroll entries, Ctrl+D/U to page, and g/G to jump to the first/last entry.
 | Ctrl+P | Discoverable filtered command palette |
 
 Text modals support Unicode character insertion, arrows, Home/End, Ctrl+A/E,
-Ctrl+K to delete to line end, Ctrl+U to clear, Backspace/Delete and multiline
+Ctrl+W to delete the preceding whitespace-delimited word (including whitespace
+immediately before the cursor), Ctrl+K to delete to line end, Ctrl+U to clear,
+Backspace/Delete and multiline
 up/down. Tab completes context columns/tables/keywords, or palette commands.
 Enter inserts a newline in SQL/JSON; Ctrl+R runs/previews. Enter accepts a filter,
 export path, sidebar search or command. A positive row number in the SQL editor
