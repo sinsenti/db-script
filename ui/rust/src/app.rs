@@ -980,7 +980,9 @@ impl App {
                         self.modal = Some(modal);
                         return;
                     }
-                    K::Tab => {
+                    K::Tab | K::Enter
+                        if key.code == K::Tab || !ctrl && suggestions.enter_accepts() =>
+                    {
                         suggestions.apply(text, cursor);
                         self.modal = Some(modal);
                         self.refresh_filter_suggestions();
@@ -1391,6 +1393,7 @@ SEARCH & QUERY
 Ctrl+R\tRun SQL or accept JSON in an editor
 Ctrl+G\tOpen the active prompt in your external editor
 Tab (filter)\tAccept a suggestion; reopen hidden suggestions
+Enter (filter)\tAccept a JSON/arrow-selected suggestion; otherwise apply filter
 ↑/↓ (filter)\tChoose a column, JSON path, predicate or value
 Esc (filter)\tHide suggestions first, then close the prompt
 Tab (editor)\tComplete columns, tables or SQL keywords
@@ -1444,6 +1447,66 @@ Raw SQL screens are read only; --read-only disables all mutations.
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_filter_enter_browses_fields_without_submitting() {
+        let db = Async::disconnected();
+        let mut app = App::new(Config {
+            engine: "postgres".into(),
+            read_only: true,
+            ..Config::default()
+        });
+        app.busy = false;
+        app.focus = Focus::Grid;
+        app.page.headers = vec!["extracted_spec".into()];
+        app.page.rows = vec![vec![json!({"$type":"json", "value": {
+            "manufacturer":"Example", "customer":{"name":"Ada"},
+            "items":[{"code":"A1"}], "empty":{}, "a.b":{"混合":"value"}
+        }})]];
+        app.meta
+            .types
+            .insert("extracted_spec".into(), "json".into());
+        app.json_fields = crate::json_completion::discover(&app.page, &app.meta, "postgres");
+        app.input(Edit::Filter, "extracted_spec".into());
+        let enter = KeyEvent::new(K::Enter, M::NONE);
+        app.key(enter, &db);
+        let input = |a: &App| match &a.modal {
+            Some(Modal::Input {
+                kind: Edit::Filter,
+                text,
+                ..
+            }) => text.clone(),
+            _ => panic!("JSON selection closed the filter"),
+        };
+        assert_eq!(input(&app), "\"extracted_spec\".");
+        let choices = app.filter_suggestions.as_ref().unwrap();
+        assert!(choices.items.iter().any(|i| i.label.ends_with(".customer")));
+        assert!(!choices
+            .items
+            .iter()
+            .any(|i| i.label.ends_with(".customer.name")));
+        for c in "customer".chars() {
+            app.key(KeyEvent::new(K::Char(c), M::NONE), &db);
+        }
+        app.key(enter, &db);
+        assert_eq!(input(&app), "\"extracted_spec\".customer.");
+        app.key(enter, &db);
+        assert_eq!(
+            input(&app),
+            "(\"extracted_spec\" #>> ARRAY['customer', 'name']) "
+        );
+        app.key(KeyEvent::new(K::Tab, M::NONE), &db);
+        assert_eq!(
+            app.filter_suggestions.as_ref().unwrap().items[0].kind,
+            "JSON value"
+        );
+        app.key(enter, &db);
+        assert!(input(&app).ends_with("= 'Ada' "));
+        assert!(!app.busy);
+        app.key(KeyEvent::new(K::Char('r'), M::CONTROL), &db);
+        assert!(app.modal.is_none());
+        assert!(app.spec.filter.ends_with("= 'Ada' "));
+    }
+
     #[test]
     fn text_modals_support_prompt_line_editing() {
         let db = Async::disconnected();

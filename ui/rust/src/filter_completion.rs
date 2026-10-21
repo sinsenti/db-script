@@ -14,6 +14,7 @@ pub struct Suggestions {
     pub end: usize,
     pub items: Vec<Item>,
     pub selected: usize,
+    pub selected_explicitly: bool,
 }
 impl Suggestions {
     pub fn apply(&self, text: &mut String, cursor: &mut usize) {
@@ -32,12 +33,108 @@ impl Suggestions {
         if self.items.is_empty() {
             return;
         }
+        self.selected_explicitly = true;
         self.selected = if forward {
             (self.selected + 1) % self.items.len()
         } else {
             (self.selected + self.items.len() - 1) % self.items.len()
         };
     }
+    pub fn enter_accepts(&self) -> bool {
+        self.items
+            .get(self.selected)
+            .is_some_and(|item| self.selected_explicitly || item.kind.starts_with("JSON"))
+    }
+}
+
+// Browse one JSON level at a time. Keep the shorthand in the prompt until a
+// leaf is selected; only then expand to the dialect's executable expression.
+fn json_children(
+    chars: &[char],
+    cursor: usize,
+    json: &[crate::json_completion::Field],
+) -> Option<Suggestions> {
+    let before: String = chars[..cursor].iter().collect();
+    let mut parents = Vec::new();
+    for field in json {
+        let root = data::quote(&field.column).ok()?;
+        for (selector, alias) in [(root, field.column.clone())].into_iter().chain(
+            field
+                .branch
+                .then(|| (field.selector.clone(), field.label.clone())),
+        ) {
+            if !parents.iter().any(|p: &(String, String)| p.0 == selector) {
+                parents.push((selector, alias));
+            }
+        }
+    }
+    // The deepest matching parent wins over a containing object.
+    parents.sort_by_key(|(selector, _)| std::cmp::Reverse(selector.len()));
+    for (parent, alias) in parents {
+        for spelling in [&parent, &alias] {
+            let prefix = format!("{spelling}.");
+            let Some(at) = before.rfind(&prefix) else {
+                continue;
+            };
+            if at > 0 && !before[..at].ends_with(|c: char| c.is_whitespace() || c == '(') {
+                continue;
+            }
+            let needle = &before[at + prefix.len()..];
+            let children: Vec<_> = json.iter().filter(|f| f.parent == parent).collect();
+            if !needle.is_empty()
+                && !children.iter().any(|f| {
+                    matches_prefix(needle, f.selector[parent.len()..].trim_start_matches('.'))
+                })
+            {
+                continue;
+            }
+            let start = before[..at].chars().count();
+            // Replace the whole current path, preserving any following clause.
+            let mut end = cursor;
+            let mut quote = None;
+            for (i, c) in chars[start..].iter().copied().enumerate() {
+                if let Some(q) = quote {
+                    if c == q {
+                        quote = None;
+                    }
+                } else if matches!(c, '\'' | '"') {
+                    quote = Some(c);
+                } else if c.is_whitespace() || "=<>!(),".contains(c) {
+                    end = (start + i).max(cursor);
+                    break;
+                }
+                end = start + i + 1;
+            }
+            let mut out = Suggestions {
+                start,
+                end,
+                ..Suggestions::default()
+            };
+            for field in children {
+                let child = field.selector[parent.len()..].trim_start_matches('.');
+                if !matches_prefix(needle, child) {
+                    continue;
+                }
+                let branch = field.branch && json.iter().any(|f| f.parent == field.selector);
+                out.items.push(Item {
+                    label: field.label.replace(['\n', '\r', '\t'], " "),
+                    replacement: if branch {
+                        format!("{}.", field.selector)
+                    } else if chars.get(end).is_some_and(|c| c.is_whitespace()) {
+                        field.expression.clone()
+                    } else {
+                        format!("{} ", field.expression)
+                    },
+                    kind: if branch { "JSON fields" } else { "JSON path" },
+                });
+                if out.items.len() == 40 {
+                    break;
+                }
+            }
+            return Some(out);
+        }
+    }
+    None
 }
 #[derive(Clone, Debug)]
 struct Token {
@@ -109,6 +206,59 @@ fn tokens(chars: &[char], json: &[crate::json_completion::Field]) -> Vec<Token> 
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn json_browsing_supports_arrays_quoted_keys_and_surrounding_clauses() {
+        for engine in ["sqlite", "postgres"] {
+            let payload = json!({"items":[{"code":"a'b"}], "a.b":{"混合":"ok"}, "empty":{}});
+            let page = Page {
+                headers: vec!["payload".into()],
+                rows: vec![vec![if engine == "sqlite" {
+                    json!(payload.to_string())
+                } else {
+                    json!({"$type":"json","value":payload})
+                }]],
+                ..Page::default()
+            };
+            let mut meta = Meta::default();
+            meta.types.insert("payload".into(), "json".into());
+            let fields = crate::json_completion::discover(&page, &meta, engine);
+            for (path, ends_with) in [
+                ("\"payload\".items.", "\"payload\".items[0]."),
+                ("\"payload\".items[0].", "expression"),
+                ("\"payload\"[\"a.b\"].", "expression"),
+            ] {
+                let mut text = format!("id > 0 AND {path} OR id = 2");
+                let mut cursor = format!("id > 0 AND {path}").chars().count();
+                let suggestions = suggest(&text, cursor, &page, &meta, engine, &fields);
+                assert_eq!(suggestions.items.len(), 1, "{engine}: {path}");
+                suggestions.apply(&mut text, &mut cursor);
+                assert!(text.starts_with("id > 0 AND "));
+                assert!(text.ends_with(" OR id = 2"));
+                if ends_with == "expression" {
+                    assert!(text.contains(if engine == "sqlite" {
+                        "json_extract"
+                    } else {
+                        "#>>"
+                    }));
+                } else {
+                    assert!(text.contains(ends_with));
+                }
+            }
+            let text = "\"payload\".empty";
+            let suggestions = suggest(text, text.chars().count(), &page, &meta, engine, &fields);
+            assert_eq!(
+                suggestions.items[0].kind, "JSON path",
+                "empty objects must not be dead ends"
+            );
+        }
+    }
+}
 fn unquote(value: &str, quote: Option<char>) -> String {
     if let Some(q) = quote {
         let value = value.strip_prefix(q).unwrap_or(value);
@@ -142,6 +292,9 @@ pub fn suggest(
 ) -> Suggestions {
     let chars: Vec<_> = text.chars().collect();
     let cursor = cursor.min(chars.len());
+    if let Some(children) = json_children(&chars, cursor, json) {
+        return children;
+    }
     let tokens = tokens(&chars, json);
     let current = tokens.iter().find(|t| t.start <= cursor && cursor <= t.end);
     let (start, end, prefix, quote) = if let Some(t) = current {
@@ -229,12 +382,16 @@ pub fn suggest(
         for h in &headers {
             if matches_prefix(&prefix, h) {
                 if let Ok(name) = data::quote(h) {
-                    push(h.clone(), spaced(&name), "column");
+                    if json.iter().any(|f| &f.column == h) {
+                        push(h.clone(), format!("{name}."), "JSON column");
+                    } else {
+                        push(h.clone(), spaced(&name), "column");
+                    }
                 }
             }
         }
     }
-    if (expecting_column || json_prefix.is_some()) && quote != Some('\'') {
+    if json_prefix.is_some() && quote != Some('\'') {
         let path_prefix = if let Some(column) = &json_prefix {
             format!("{column}{prefix}")
         } else {

@@ -85,12 +85,14 @@ browsing are unsupported. Raw SQL remains read-only in writable sessions.
 ## Filter completion
 
 Grid `/` suggests columns, predicates and short cached values. Use ↑/↓ to select,
-Tab to accept, and Enter to submit the filter as typed. Esc hides suggestions
+Tab to accept. Enter accepts JSON suggestions or an arrow-selected suggestion;
+otherwise it submits the filter as typed. Ctrl+R always applies the filter. Esc hides suggestions
 before closing the prompt; Tab reopens them. Completion respects the cursor and
 preserves surrounding clauses. Values come only from the loaded page; no table
 scan or extra query runs while typing. Sidebar `/` remains table-name search.
-JSON columns also suggest observed nested keys/array paths: type `payload.` and
-accept a path with Tab to insert SQLite `json_extract` or PostgreSQL `#>>` SQL.
+Choose a JSON column with Tab/Enter to browse its immediate observed fields,
+then descend through objects/arrays. Accepting a leaf inserts SQLite `json_extract`
+or PostgreSQL `#>>` SQL. Typing a prefix such as `payload.` works too.
 The path shorthand must be completed before submission. PostgreSQL extraction
 returns text; cast explicitly for numeric comparisons. Empty/unseen keys and
 oversized JSON documents are outside the bounded discovery sample.

@@ -178,12 +178,15 @@ visible while scrolling entries and wrap values within aligned cells.
 Built-in Rust text prompts support Ctrl+W to delete the preceding word, including
 whitespace immediately before the cursor, using Unicode character positions.
 Grid `/` has cursor-local column/predicate/cached-scalar suggestions, selected
-with arrows and accepted with Tab; Enter submits text, and Esc hides the list
+with arrows and accepted with Tab; Enter accepts JSON or explicitly arrow-selected
+suggestions and otherwise submits text. Ctrl+R always submits; Esc hides the list
 before closing the prompt. Completion is event-driven and must never query the
 DB while typing/rendering. Sidebar `/` remains table-name search.
 JSON path candidates are discovered once per loaded page with strict text/node,
-row/column/depth/array limits; see ui/rust/README.md. Tab expands observed dotted
-labels into guarded SQLite json_extract or native PostgreSQL #>> expressions.
+row/column/depth/array limits; see ui/rust/README.md. Choosing a JSON column keeps
+the prompt open and lists immediate fields; objects/arrays descend one level at
+a time. Accepting a leaf expands its label into guarded SQLite json_extract or
+native PostgreSQL #>> expressions.
 Keep scalar quoting consistent with extraction types (PostgreSQL #>> is text),
 and preserve the surrounding predicate when completing at the cursor.
 Rust lowercase `e` opens the current row directly in the external editor, then

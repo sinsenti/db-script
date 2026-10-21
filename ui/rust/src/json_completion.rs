@@ -4,6 +4,10 @@ use serde_json::Value;
 
 #[derive(Clone, Debug)]
 pub struct Field {
+    pub column: String,
+    pub selector: String,
+    pub parent: String,
+    pub branch: bool,
     pub label: String,
     pub expression: String,
     pub values: Vec<Value>,
@@ -84,6 +88,10 @@ impl Discovery {
                 Some(index) => index,
                 None if self.fields.len() < 128 => {
                     self.fields.push(Field {
+                        column: column.into(),
+                        selector: label(&data::quote(column).unwrap(), path),
+                        parent: label(&data::quote(column).unwrap(), &path[..path.len() - 1]),
+                        branch: false,
                         label: label(column, path),
                         expression,
                         values: vec![],
@@ -92,6 +100,7 @@ impl Discovery {
                 }
                 None => return,
             };
+            self.fields[index].branch |= matches!(value, Value::Object(_) | Value::Array(_));
             let scalar = match value {
                 Value::Null | Value::Bool(_) | Value::Number(_) => Some(value.clone()),
                 Value::String(s) if s.len() <= 160 => Some(value.clone()),

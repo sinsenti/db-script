@@ -512,7 +512,7 @@ pub fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
 }
 
 fn filter_input(f: &mut Frame, a: &App, text: &str, cursor: usize, rect: Rect) {
-    let border = block(" Filter · Enter apply · Ctrl+G editor ", true).title_bottom(Line::styled(
+    let border = block(" Filter · Ctrl+R apply · Ctrl+G editor ", true).title_bottom(Line::styled(
         " Esc hides suggestions / closes prompt ",
         Style::default().fg(MUTED),
     ));
@@ -548,7 +548,10 @@ fn filter_input(f: &mut Frame, a: &App, text: &str, cursor: usize, rect: Rect) {
                     Span::raw(item.label.clone()),
                 ]))
             }))
-            .block(block(" Suggestions · ↑/↓ choose · Tab accept ", false))
+            .block(block(
+                " Suggestions · ↑/↓ choose · Tab/Enter accept ",
+                false,
+            ))
             .highlight_symbol("› ")
             .highlight_style(
                 Style::default()

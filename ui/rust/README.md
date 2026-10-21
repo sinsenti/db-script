@@ -104,8 +104,10 @@ as identifiers. For example, type `ta`, accept `tags`, accept `=`, then choose a
 cached tag value or type your own quoted string. Single-word plain searches also
 suggest short cached text, without adding SQL quoting or changing search mode.
 
-Enter always submits the filter as typed; it does not accept the highlighted
-suggestion. Esc first hides suggestions, then closes the prompt. Tab reopens a
+Enter accepts a JSON suggestion or a suggestion explicitly selected with ↑/↓
+(or Shift+Tab), keeping the prompt open. Otherwise Enter submits the filter as
+typed. Ctrl+R always applies the typed filter, even with suggestions visible.
+Esc first hides suggestions, then closes the prompt. Tab reopens a
 hidden list. Cursor-local completion replaces the current token while preserving
 surrounding clauses; Ctrl+W and other text editing shortcuts still work. Typing
 without accepting a suggestion retains the existing plain-text search / SQL
@@ -118,11 +120,15 @@ typed manually. This is contextual completion, not a complete SQL parser.
 
 ### JSON keys and paths
 
-The same suggestion list includes JSON paths discovered from the loaded page.
-Type a JSON column followed by `.`, such as `extended_properties_json.`, select
-an observed nested key or array path, and press Tab. Quoted column prefixes such
-as `"payload".` also work. A path like `payload.customer.name` or
-`payload.items[0].code` is a completion label; Tab replaces it with executable SQL.
+Choose a JSON column in the initial column list with Tab or Enter. The prompt
+stays open and shows its immediate observed fields. Choose an object or array to
+browse its children, then choose a leaf to insert executable SQL. For example:
+`payload` → `customer` → `name` → `=` → a cached name or your own quoted string.
+Use ↑/↓ to select and Tab or Enter to accept; Ctrl+R applies the finished filter.
+You can also type a JSON column followed by `.`, such as
+`extended_properties_json.`. Quoted column prefixes such as `"payload".` work too.
+A path like `payload.customer.name` or `payload.items[0].code` is a completion
+label; accepting the leaf replaces it with executable SQL.
 The shorthand itself is not a new filter language: accept the suggestion before
 submitting. The next suggestions offer predicates and observed scalar values for
 that specific path. Surrounding filter clauses and cursor-local editing remain
@@ -146,6 +152,20 @@ SQLite keys containing double quotes, backslashes or control characters are not
 offered because their path escaping is ambiguous; enter a suitable expression
 manually. PostgreSQL TEXT and native JSON-array columns are outside native
 JSON/JSONB path discovery. No additional database reads are issued for discovery.
+
+The read-only live check below exercises `public.quotes.extracted_spec` on an
+explicitly selected Docker PostgreSQL copy. It checks prompt navigation, cached
+text/numeric values, NULL predicates, combined clauses and Esc/reopen behavior;
+compares backend row IDs/counts with direct SQL; checks terminal restoration; and
+checks that a whole-table checksum is unchanged. It performs no database writes.
+Install `benchmarks/quotes_perf/requirements.txt` into your test environment first.
+
+```sh
+python3 ui/rust/tests/json_filter_postgres_pty.py --container a1labs-postgres-copy
+```
+
+Nested objects, array navigation and quoted/Unicode keys also have offline Rust
+regression coverage; this live check uses fields present in the copy's loaded page.
 
 ## Direct single-row editing
 
