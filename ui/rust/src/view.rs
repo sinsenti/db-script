@@ -510,6 +510,66 @@ pub fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+fn filter_input(f: &mut Frame, a: &App, text: &str, cursor: usize, rect: Rect) {
+    let border = block(" Filter · Enter apply · Ctrl+G editor ", true).title_bottom(Line::styled(
+        " Esc hides suggestions / closes prompt ",
+        Style::default().fg(MUTED),
+    ));
+    let inner = border.inner(rect);
+    f.render_widget(border, rect);
+    let count = a.filter_suggestions.as_ref().map_or(0, |s| s.items.len());
+    let popup_height = if count == 0 {
+        0
+    } else {
+        (count.min(8) as u16 + 2).min(inner.height.saturating_sub(3))
+    };
+    let parts =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(popup_height)]).split(inner);
+    let before: String = text.chars().take(cursor).collect();
+    let lines = wrapped_lines(&before, parts[0].width as usize);
+    let last_width = lines
+        .last()
+        .map_or(0, |line| UnicodeWidthStr::width(line.as_str()));
+    let boundary = parts[0].width > 0 && last_width >= parts[0].width as usize;
+    let cursor_y = lines.len().saturating_sub(1) + usize::from(boundary);
+    let cursor_x = if boundary { 0 } else { last_width };
+    let scroll = cursor_y.saturating_sub(parts[0].height.saturating_sub(1) as usize);
+    f.render_widget(
+        Paragraph::new(wrapped_lines(text, parts[0].width as usize).join("\n"))
+            .scroll((scroll as u16, 0)),
+        parts[0],
+    );
+    if let Some(suggestions) = &a.filter_suggestions {
+        if popup_height > 0 {
+            let list = List::new(suggestions.items.iter().map(|item| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<13} ", item.kind), Style::default().fg(MUTED)),
+                    Span::raw(item.label.clone()),
+                ]))
+            }))
+            .block(block(" Suggestions · ↑/↓ choose · Tab accept ", false))
+            .highlight_symbol("› ")
+            .highlight_style(
+                Style::default()
+                    .fg(ACCENT)
+                    .bg(Color::Rgb(39, 64, 83))
+                    .bold(),
+            );
+            f.render_stateful_widget(
+                list,
+                parts[1],
+                &mut ListState::default().with_selected(Some(suggestions.selected)),
+            );
+        }
+    }
+    if parts[0].width > 0 && parts[0].height > 0 {
+        f.set_cursor_position((
+            parts[0].x + (cursor_x as u16).min(parts[0].width - 1),
+            parts[0].y + ((cursor_y - scroll) as u16).min(parts[0].height - 1),
+        ));
+    }
+}
+
 fn modal(f: &mut Frame, a: &App, m: &Modal, area: Rect) {
     if let Modal::Help { scroll } = m {
         help(f, area, *scroll);
@@ -609,6 +669,10 @@ fn modal(f: &mut Frame, a: &App, m: &Modal, area: Rect) {
             );
         }
         Modal::Input { kind, text, cursor } => {
+            if matches!(kind, Edit::Filter) {
+                filter_input(f, a, text, *cursor, rect);
+                return;
+            }
             let label = match kind {
                 Edit::Filter => "Filter · Enter apply",
                 Edit::Search => "Search tables · Enter apply",

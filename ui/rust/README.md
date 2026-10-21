@@ -72,7 +72,8 @@ to scroll entries, Ctrl+D/U to page, and g/G to jump to the first/last entry.
 | f | FK chooser and nested browser, including composite/cross-schema FKs |
 | S/3, I/4 | Full schema and index/constraint/trigger views |
 | x, X | JSON export; JSON/CSV/SQL format chooser |
-| a/e | Insert or edit one original row |
+| a | Insert a row using the built-in JSON prompt |
+| e | Open the current row directly in the external editor, then review changes |
 | E | Direct Neovim bulk diff, then count-only confirmation |
 | dd | Delete current or marked rows after full preview |
 | ? | Help modal |
@@ -86,6 +87,45 @@ up/down. Tab completes context columns/tables/keywords, or palette commands.
 Enter inserts a newline in SQL/JSON; Ctrl+R runs/previews. Enter accepts a filter,
 export path, sidebar search or command. A positive row number in the SQL editor
 jumps within the current result. The SQL draft is retained when its modal closes.
+
+## Filter suggestions
+
+With the grid focused, `/` opens a filter prompt with a suggestion list. Type a
+column prefix, use ↑/↓ (or Shift+Tab to move backward), and press Tab to accept.
+The next suggestions offer predicates such as `=`, `LIKE`, `IN (` and `IS NULL`;
+PostgreSQL also offers `ILIKE`. After an operator, short scalar values from the
+already-loaded page can be suggested with SQL quoting. Column names are quoted
+as identifiers. For example, type `ta`, accept `tags`, accept `=`, then choose a
+cached tag value or type your own quoted string. Single-word plain searches also
+suggest short cached text, without adding SQL quoting or changing search mode.
+
+Enter always submits the filter as typed; it does not accept the highlighted
+suggestion. Esc first hides suggestions, then closes the prompt. Tab reopens a
+hidden list. Cursor-local completion replaces the current token while preserving
+surrounding clauses; Ctrl+W and other text editing shortcuts still work. Typing
+without accepting a suggestion retains the existing plain-text search / SQL
+predicate behavior. Sidebar `/` continues to search table names separately.
+
+Suggestions use metadata and at most the first 50 loaded rows, with at most 40
+items and short scalar values only. They do not fetch more rows, scan the table,
+or run SQL while typing/rendering. Values missing from the current page must be
+typed manually. This is contextual completion, not a complete SQL parser.
+
+## Direct single-row editing
+
+Lowercase `e` opens the current writable table row directly in `$EDITOR` (falling
+back to nvim, vim, then nano). Edit the JSON and save/exit; the browser parses it
+and displays the existing explicit mutation review. Press `y` to apply. Editor
+exit alone never writes to the database. An unchanged document, including JSON
+whitespace-only changes, performs no writes. A nonzero editor exit cancels.
+
+The immutable original row/PK remains in memory for the existing stale-snapshot
+and affected-row checks. Untouched fields keep their exact original storage
+values, including JSON TEXT formatting. Invalid edited JSON stays in the built-in
+prompt for correction with Ctrl+G and Ctrl+R. Raw SQL results and read-only table
+sessions still reject editing. Uppercase `E` retains its separate bulk Neovim diff
+workflow. Inserts keep their built-in JSON prompt; Ctrl+G still opens that prompt
+in an external editor.
 
 `EDITOR` is parsed as program plus arguments, without shell evaluation. Without
 it, nvim/vim/nano are tried. Temporary files are mode 0600 and removed after
@@ -254,6 +294,8 @@ part of this contract. Completion is contextual, not a complete SQL grammar.
   composition, typed values, atomic plan validation and JSON/CSV/SQL exports.
 - `app.rs`: event-driven state, nested browser stack, modals, drafts, marks and
   confirmation. Raw snapshots remain separate from editable JSON.
+- `filter_completion.rs`: cursor-local token completion from cached metadata/rows,
+  bounded suggestions and identifier/value quoting; no database access.
 - `view.rs`: pure Ratatui widgets, responsive column viewport and Unicode text.
 - `main.rs`: CLI, event polling, signal/terminal lifecycle and editor handoff.
 

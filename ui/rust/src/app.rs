@@ -96,6 +96,8 @@ pub struct App {
     pub inspector: Page,
     pub scroll: u16,
     pub external: bool,
+    pub external_review: bool,
+    pub filter_suggestions: Option<crate::filter_completion::Suggestions>,
     pub bulk_external: Option<(Vec<Value>, Value)>,
     pub width: u16,
     pub height: u16,
@@ -135,6 +137,8 @@ impl App {
             inspector: Page::default(),
             scroll: 0,
             external: false,
+            external_review: false,
+            filter_suggestions: None,
             bulk_external: None,
             width: 120,
             height: 35,
@@ -303,6 +307,26 @@ impl App {
     fn input(&mut self, kind: Edit, text: String) {
         let cursor = text.chars().count();
         self.modal = Some(Modal::Input { kind, text, cursor });
+        self.refresh_filter_suggestions();
+    }
+    fn refresh_filter_suggestions(&mut self) {
+        self.filter_suggestions = match &self.modal {
+            Some(Modal::Input {
+                kind: Edit::Filter,
+                text,
+                cursor,
+            }) => {
+                let suggestions = crate::filter_completion::suggest(
+                    text,
+                    *cursor,
+                    &self.page,
+                    &self.meta,
+                    &self.config.engine,
+                );
+                (!suggestions.items.is_empty()).then_some(suggestions)
+            }
+            _ => None,
+        };
     }
     fn writable(&mut self) -> bool {
         if self.read_only() {
@@ -330,6 +354,8 @@ impl App {
                 },
                 serde_json::to_string_pretty(&editable(&row)).unwrap(),
             );
+            self.external = true;
+            self.external_review = true;
         }
     }
     fn insert(&mut self) {
@@ -548,6 +574,39 @@ impl App {
         {
             *t = text;
             *cursor = t.chars().count();
+        }
+    }
+    pub fn external_finished(&mut self, result: Result<String>, db: &Async) {
+        let direct = std::mem::take(&mut self.external_review);
+        match result {
+            Ok(text) => {
+                self.external_result(text.clone());
+                if direct {
+                    let kind = match &self.modal {
+                        Some(Modal::Input {
+                            kind: kind @ Edit::Row { .. },
+                            ..
+                        }) => kind.clone(),
+                        _ => return,
+                    };
+                    match self.accept_input(kind, text, db) {
+                        Ok(()) => {
+                            if matches!(self.modal, Some(Modal::Input { .. })) {
+                                self.modal = None;
+                            }
+                        }
+                        Err(error) => self.status = error,
+                    }
+                } else {
+                    self.refresh_filter_suggestions();
+                }
+            }
+            Err(error) => {
+                if direct {
+                    self.modal = None;
+                }
+                self.status = format!("{error}; nothing written");
+            }
         }
     }
     pub fn key(&mut self, key: KeyEvent, db: &Async) {
@@ -908,6 +967,51 @@ impl App {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
+        if let Modal::Input {
+            kind: Edit::Filter,
+            text,
+            cursor,
+        } = &mut modal
+        {
+            if key.code == K::Tab && self.filter_suggestions.is_none() {
+                let suggestions = crate::filter_completion::suggest(
+                    text,
+                    *cursor,
+                    &self.page,
+                    &self.meta,
+                    &self.config.engine,
+                );
+                self.filter_suggestions = (!suggestions.items.is_empty()).then_some(suggestions);
+                self.modal = Some(modal);
+                return;
+            }
+            if let Some(suggestions) = &mut self.filter_suggestions {
+                match key.code {
+                    K::Up | K::BackTab => {
+                        suggestions.move_selection(false);
+                        self.modal = Some(modal);
+                        return;
+                    }
+                    K::Down => {
+                        suggestions.move_selection(true);
+                        self.modal = Some(modal);
+                        return;
+                    }
+                    K::Tab => {
+                        suggestions.apply(text, cursor);
+                        self.modal = Some(modal);
+                        self.refresh_filter_suggestions();
+                        return;
+                    }
+                    K::Esc => {
+                        self.filter_suggestions = None;
+                        self.modal = Some(modal);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if key.code == K::Esc {
             if let Modal::Input {
                 kind: Edit::Sql,
@@ -1140,6 +1244,7 @@ impl App {
         if self.modal.is_none() {
             self.modal = Some(modal);
         }
+        self.refresh_filter_suggestions();
     }
     fn accept_input(&mut self, kind: Edit, text: String, db: &Async) -> Result<()> {
         match kind {
@@ -1174,7 +1279,22 @@ impl App {
             Edit::Row { original } => {
                 let v: Value = serde_json::from_str(&text)
                     .map_err(|_| "Invalid JSON; correct the editor text")?;
-                let row = normalize_row(&v, Some(&original), &self.meta, &self.page.headers)?;
+                if v == editable(&original) {
+                    self.modal = None;
+                    self.status = "No changes — no writes".into();
+                    return Ok(());
+                }
+                let mut row = normalize_row(&v, Some(&original), &self.meta, &self.page.headers)?;
+                // Preserve exact original storage for fields unchanged in the editor.
+                // In particular, editing tags must not rewrite JSON TEXT formatting.
+                let before = editable(&original);
+                for (column, value) in row.as_object_mut().unwrap() {
+                    if v.get(column) == before.get(column) {
+                        if let Some(original_value) = original.get(column) {
+                            *value = original_value.clone();
+                        }
+                    }
+                }
                 for h in &self.page.headers {
                     if row.get(h).is_none() {
                         return Err(format!("Missing field {h}; preserve complete row"));
@@ -1287,6 +1407,9 @@ SEARCH & QUERY
 : or 2\tOpen the multiline SQL editor
 Ctrl+R\tRun SQL or accept JSON in an editor
 Ctrl+G\tOpen the active prompt in your external editor
+Tab (filter)\tAccept a suggestion; reopen hidden suggestions
+↑/↓ (filter)\tChoose a column, predicate or cached value
+Esc (filter)\tHide suggestions first, then close the prompt
 Tab (editor)\tComplete columns, tables or SQL keywords
 o/O\tToggle ascending / descending sort
 v\tChoose visible columns
@@ -1309,7 +1432,7 @@ X\tChoose JSON, CSV or SQL export
 
 WRITES · WRITABLE TABLES ONLY
 a\tInsert a JSON object or array
-e\tEdit the current row
+e\tEdit the current row in your external editor
 E\tOpen bulk edits as a private Neovim diff
 dd\tReview deletion of current or marked rows
 y (review)\tConfirm one atomic transaction

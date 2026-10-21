@@ -62,7 +62,10 @@ without Python when credentials are already configured:
 
 ## Editing
 
-`a` inserts, `e` edits one row, and `dd` deletes after confirmation. `E` opens a
+`a` inserts, `e` opens the current row directly in `$EDITOR` (then nvim/vim/nano),
+and `dd` deletes after confirmation. Saving/exiting the single-row editor returns
+to explicit review; `y` confirms, and unchanged/cancelled edits perform no writes.
+`E` opens a
 private Neovim diff: original on the left, editable plan on the right. Use `zR`
 to open folds, `:wqa` to return to operation-count confirmation, or `:cq` to cancel.
 The editor's `original` fields contain only the complete primary key, for example
@@ -78,6 +81,15 @@ See [backend controls](rust/WRITABLE_SQLITE.md), [PostgreSQL contracts](rust/POS
 and [Ratatui controls](ui/rust/README.md). Bulk editing is bounded to 100,000 rows
 and holds data in memory. PostgreSQL TLS-required endpoints and interactive MySQL
 browsing are unsupported. Raw SQL remains read-only in writable sessions.
+
+## Filter completion
+
+Grid `/` suggests columns, predicates and short cached values. Use ↑/↓ to select,
+Tab to accept, and Enter to submit the filter as typed. Esc hides suggestions
+before closing the prompt; Tab reopens them. Completion respects the cursor and
+preserves surrounding clauses. Values come only from the loaded page; no table
+scan or extra query runs while typing. Sidebar `/` remains table-name search.
+See [the UI guide](ui/rust/README.md#filter-suggestions) for examples and limits.
 
 ## Cancelling reads and worker limits
 

@@ -273,9 +273,12 @@ def ui_case(action, args, data):
                     if action in ['bulk', 'bulk_rollback']:
                         control.write_text(json.dumps(value)); t.send('E')
                         assert t.wait(lambda: 'bulk count confirmation' in t.display.lower()), 'bulk count confirmation missing'
-                    else:
-                        t.send('a' if action == 'insert' else 'e'); external(value)
+                    elif action == 'insert':
+                        t.send('a'); external(value)
                         t.send(b'\x12'); assert t.wait(lambda: 'preview' in t.display.lower()), 'mutation preview missing'
+                    else:
+                        control.write_text(json.dumps(value)); t.send('e')
+                        assert t.wait(lambda: 'preview' in t.display.lower()), 'external row review missing'
                     if action == 'edit_cancel':
                         t.send(b'\x1b'); assert snapshot(c, table) == before
                     else:

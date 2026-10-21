@@ -202,10 +202,7 @@ fn run(c: Config) -> Result<(), Box<dyn std::error::Error>> {
                     execute!(io::stdout(), EnterAlternateScreen)?;
                     enable_raw_mode()?;
                     terminal.clear()?;
-                    match edited {
-                        Ok(text) => app.external_result(text),
-                        Err(e) => app.status = e,
-                    }
+                    app.external_finished(edited, &db);
                 }
                 continue;
             }

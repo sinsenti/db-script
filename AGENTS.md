@@ -175,6 +175,13 @@ Its `?` guide has one shortcut/group per row; schema/inspector tables keep heade
 visible while scrolling entries and wrap values within aligned cells.
 Built-in Rust text prompts support Ctrl+W to delete the preceding word, including
 whitespace immediately before the cursor, using Unicode character positions.
+Grid `/` has cursor-local column/predicate/cached-scalar suggestions, selected
+with arrows and accepted with Tab; Enter submits text, and Esc hides the list
+before closing the prompt. Completion is event-driven and must never query the
+DB while typing/rendering. Sidebar `/` remains table-name search.
+Rust lowercase `e` opens the current row directly in the external editor, then
+uses explicit review/confirmation; cancel/no-op paths never write. Preserve exact
+original storage for untouched fields and keep the full immutable snapshot/PK.
 
 Use `dbcli/ui.py` as the source of truth for keybindings, not older planning notes.
 
