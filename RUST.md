@@ -2,7 +2,7 @@
 
 Main includes the **Original Rust backend** selected from the PostgreSQL `quotes`
 comparison, plus its matching Ratatui interface. Python remains available through
-`db.py` / `dbcli`. SQLite and PostgreSQL sessions are writable by default.
+`db.py --python` / `dbcli --python`. SQLite and PostgreSQL sessions are writable by default.
 
 ## Build
 
@@ -14,6 +14,25 @@ bash tools/build_rust.sh
 ```
 
 ## Start
+
+The standard entry command now opens the discovery picker, then Rust:
+
+```bash
+python ~/git/personal/db-script/db.py
+python ~/git/personal/db-script/db.py --read-only
+```
+
+The title is **Interactive Database Browser & Explorer**. It lists current-directory
+SQLite files, running database containers, an optional PostgreSQL environment URL,
+manual SQLite path entry and refresh. PostgreSQL containers offer accessible
+databases before Rust's table browser. Closing Rust returns to this picker.
+Docker PostgreSQL requires a local published port and resolvable credentials;
+credentials stay in memory/environment and no Python driver is required.
+MySQL entries are explicitly labeled Python. Use `--python` for the entire original
+Python experience, or `--cli` for its legacy client paths. Missing native binaries
+show a build hint instead of silently changing supported targets to Python.
+
+Explicit native launchers remain available:
 
 ```bash
 # Your running Docker PostgreSQL, opening quotes directly:
@@ -119,3 +138,32 @@ python3 tools/postgres_write_fixture.py stop
 
 Tests without the fixture variable report the live replay check as skipped in
 captured output. Application databases must never be used as mutation fixtures.
+
+
+## Picker terminal checks
+
+The offline startup regressions are in `tests/test_launcher.py`. Optional real
+PTY checks create disposable SQLite files and exercise picker → Rust → picker,
+manual file entry, writable/read-only propagation, interruption and terminal
+restoration. With the benchmark development environment (pyte installed):
+
+```bash
+DBCLI_RUN_PICKER_PTY=1 .local/performance-venv/bin/python -m unittest discover \
+  -s tools -p test_picker_pty.py -v
+```
+
+To also exercise container → database → Rust with synthetic PostgreSQL rows,
+start only the marked fixture managed by this checkout:
+
+```bash
+python3 tools/postgres_write_fixture.py start
+DBCLI_RUN_PICKER_PTY=1 DBCLI_RUN_PICKER_POSTGRES_PTY=1 \
+  .local/performance-venv/bin/python -m unittest discover \
+  -s tools -p test_picker_pty.py -v
+python3 tools/postgres_write_fixture.py stop
+```
+
+The PostgreSQL checks validate the private descriptor/container marker and create
+and drop only unique owned fixture schemas. No application database is used.
+`DBCLI_PICKER_PYTHON=/path/to/python` selects the interpreter used by the child
+entry point; by default it is the test interpreter. Missing opt-in flags are skips.

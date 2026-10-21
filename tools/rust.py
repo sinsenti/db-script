@@ -8,22 +8,7 @@ import shlex
 import sys
 from postgres_target import DEFAULT_CONTAINER,TargetError,docker_target,target_environment
 
-ROOT=Path(__file__).resolve().parents[1]
-WORKER=ROOT/'rust/target/release/dbcli-rust'
-FRONTEND=ROOT/'ui/rust/target/release/dbcli-ui-rust'
-
-def command(*,database=None,postgres=False,table=None,read_only=False,legacy=False):
-    if postgres and database:raise ValueError('Choose --postgres or --database PATH')
-    if not postgres:
-        if not database:raise ValueError('Choose --postgres or --database PATH')
-        path=Path(database).expanduser().resolve()
-        if not path.is_file():raise ValueError('SQLite database must be an existing file')
-    argv=[str(WORKER)]if legacy else[str(FRONTEND),'--backend','original-rust','--worker',str(WORKER)]
-    if legacy:argv+=['--postgres']if postgres else['--db',str(path)]
-    else:argv+=['--engine','postgres'if postgres else'sqlite']+([]if postgres else['--database',str(path)])
-    if table:argv+=['--table',table]
-    if read_only:argv+=['--read-only']
-    return argv
+from dbcli.rust import ROOT, WORKER, FRONTEND, command
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)

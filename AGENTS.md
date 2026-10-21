@@ -12,8 +12,12 @@ Keep it aligned with the implementation; it is not a task log or a replacement f
   `psycopg` through the `postgres` extra and `mysql-connector-python` through `mysql`.
 - The terminal UI uses ANSI escape sequences, `termios`, `tty` and `select`;
   assume a POSIX terminal, not native Windows support.
-- Continue the incremental Python refactor. The roadmap only considers a Go/Rust
-  rewrite after measuring performance and distribution needs.
+- The default `db.py` / `dbcli` entry point uses a Python discovery picker and the
+  selected Original Rust backend plus Ratatui UI for SQLite/PostgreSQL. Python stays
+  the reference implementation through `--python`; `--cli` also selects Python.
+  Interactive MySQL entries use the Python browser and are labeled in the picker.
+- Build Rust once with `bash tools/build_rust.sh`. See `RUST.md` for native controls,
+  PostgreSQL export behavior, benchmark tooling and current limits.
 
 ## Setup and verification
 
@@ -37,7 +41,9 @@ python3 db.py --version
 
 For a manual UI check, use `python3 db.py --read-only /path/to/disposable.sqlite`
 in a real terminal. Do not use a personal or production database as a test fixture.
-Even with an explicit target, startup also performs local-file and Docker discovery.
+Default startup discovers shallow current-directory SQLite files and Docker
+containers, with manual path entry and refresh actions. Explicit Rust targets skip
+this discovery. The `--python` reference retains discovery even with a target.
 
 The suite uses standard-library `unittest`, not pytest. There is no configured
 lint/format/type-check toolchain or CI workflow. The `dev` extra currently installs
@@ -60,7 +66,10 @@ skips separately from passes; an unavailable server can also cause a skip.
 
 | Path | Responsibility |
 | --- | --- |
-| `db.py` | Argument parsing, target selection, database/table menus, adapter selection and callbacks passed into the browser. Still contains substantial controller wiring. |
+| `db.py` | Argument parsing and default Rust launcher dispatch; retains the original Python controller in `python_main`. |
+| `dbcli/launcher.py` | Shared-title discovery picker, manual SQLite entry, native PostgreSQL database selection, Rust child lifecycle and MySQL compatibility handoff. |
+| `dbcli/rust.py` | Main-local Rust binary paths and credential-free command construction. |
+| `dbcli/postgres_target.py` | Shared PostgreSQL credential resolution and bounded session configuration; `tools/postgres_target.py` is a compatibility shim. |
 | `dbcli/adapters/base.py` | `DatabaseAdapter` contract, `QueryResult` and shared errors. |
 | `dbcli/adapters/sqlite.py` | SQLite metadata, paging, CRUD and guarded read queries using the standard library. |
 | `dbcli/adapters/dbapi.py` | Shared native PostgreSQL/MySQL DB-API implementation; injectable connection factories. |
@@ -76,6 +85,18 @@ skips separately from passes; an unavailable server can also cause a skip.
 
 ## Connection flow and contracts
 
+- The default picker launches Rust for SQLite/PostgreSQL in an owned child process
+  and returns to the picker on exit. Parent terminal settings/file flags are restored
+  on normal exit and handled interruption. Missing binaries produce a build hint;
+  supported targets never silently fall back to Python.
+- Docker PostgreSQL resolves a published local port and credentials in memory,
+  uses the native worker's read-only query path to list accessible databases, then
+  supplies the selected database URL only in the child's environment. No Python
+  driver or host psql is required. Existing DBCLI_POSTGRES_URL targets are offered
+  without displaying credentials or URL options. SQLite manual paths must already
+  exist. No recursive home-directory scan is performed.
+- The remaining contracts in this section describe the Python reference paths
+  (`--python`, `--cli`, or labeled MySQL entries), unless stated otherwise.
 - SQLite targets use `SQLiteAdapter`. Direct PostgreSQL/MySQL URLs prefer native
   adapters; `--cli` or a missing optional driver selects the legacy `psql`/`mysql`
   path. `create_native_adapter` catches `DriverUnavailable`, not arbitrary failures.
@@ -115,15 +136,19 @@ skips separately from passes; an unavailable server can also cause a skip.
   uses an authorizer; native DB-API adapters use statement/keyword checks. Do not
   advertise these checks as a sandbox for untrusted SQL or side-effecting functions.
 - `--read-only` hides/disables UI mutations and makes adapter CRUD reject writes.
-  SQLite opens a read-only URI, but native adapters do not configure server-enforced
-  read-only transactions; legacy paths are weaker still. Use database permissions
+  In the Python reference, SQLite opens a read-only URI, but native DB-API adapters
+  do not configure server-enforced read-only transactions; legacy paths are weaker
+  still. The default Rust PostgreSQL read path does verify server read-only
+  transactions. Use database permissions
   when a hard read-only guarantee is required. Remote sessions are writable by default.
 - Preserve JSON object/array round-tripping in editors, adapters and exports. SQL
   literal formatting for an export or relation filter is not a write-query API.
 - Do not expose credentials in logs, documentation or new subprocess arguments.
   Existing legacy commands can expose passwords; do not propagate that pattern.
 
-## Current UI behavior and known gaps
+## Python reference UI behavior and known gaps
+
+For the default Rust interface use `ui/rust/README.md` and `RUST.md`.
 
 Use `dbcli/ui.py` as the source of truth for keybindings, not older planning notes.
 
@@ -159,8 +184,9 @@ Use `dbcli/ui.py` as the source of truth for keybindings, not older planning not
    avoid new UI/editor import cycles, and follow existing typing/style conventions.
 4. Add regression tests alongside changes. Use temporary files for SQLite/exports,
    injected connection factories for native adapters, and mocked subprocess/editor
-   calls. Native fakes do not validate real-server SQL or driver behavior; the
-   interactive UI and legacy database paths currently lack dedicated test coverage.
+   calls. Native fakes do not validate real-server SQL or driver behavior. The default
+   picker has offline and opt-in disposable PTY checks; the original Python
+   interactive browsing and legacy database paths have limited dedicated coverage.
 5. For UI changes, check callback wiring and read-only propagation in SQLite,
    native direct URLs, CLI fallback, Docker and nested foreign-key/query screens.
    Preserve terminal/cursor restoration and temporary-file cleanup on failures.

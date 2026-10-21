@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,12 @@ class DiscoveryTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_docker_discovery_is_bounded_and_timeout_is_nonfatal(self):
+        def timeout(*args, **kwargs):
+            self.assertEqual(kwargs['timeout'], 5)
+            raise subprocess.TimeoutExpired('docker', 5)
+        self.assertIsNone(find_docker_databases(run=timeout))
 
     def test_find_docker_databases_returns_none_when_docker_is_unavailable(self):
         def unavailable(*args, **kwargs):

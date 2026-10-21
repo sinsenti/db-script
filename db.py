@@ -97,7 +97,7 @@ def parse_cli_args(argv=None):
     """Parse command-line options while preserving the original positional target."""
     parser = argparse.ArgumentParser(
         prog="db.py",
-        description="Keyboard-driven SQLite, PostgreSQL and MySQL database browser.",
+        description="Interactive database picker; Rust browser for SQLite/PostgreSQL, Python for MySQL.",
     )
     parser.add_argument(
         "target",
@@ -112,7 +112,12 @@ def parse_cli_args(argv=None):
     parser.add_argument(
         "--cli",
         action="store_true",
-        help="Use psql/mysql command-line fallback instead of native drivers",
+        help="Use the original Python interface with psql/mysql client fallback",
+    )
+    parser.add_argument(
+        "--python",
+        action="store_true",
+        help="Use the original Python interface instead of the Rust browser",
     )
     parser.add_argument(
         "--version",
@@ -122,10 +127,18 @@ def parse_cli_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main():
-    args = parse_cli_args()
-    cli_item = None
-    if args.target:
+def main(argv=None):
+    args = parse_cli_args(argv)
+    if args.python or args.cli:
+        return python_main(args)
+    from dbcli.launcher import run
+    return run(args, python_browser=python_main)
+
+
+def python_main(args, initial_item=None):
+    """Original reference browser, also used for interactive MySQL targets."""
+    cli_item = initial_item
+    if args.target and initial_item is None:
         raw_arg = args.target
         if raw_arg.startswith(("postgres://", "postgresql://")):
             cli_item = {
@@ -147,8 +160,8 @@ def main():
             p = Path(raw_arg)
             cli_item = {"type": "sqlite", "target": p, "label": f"SQLite: {p.name}"}
 
-    sqlite_dbs = find_sqlite_files()
-    docker_dbs = find_docker_databases() or []
+    sqlite_dbs = [] if initial_item is not None else find_sqlite_files()
+    docker_dbs = [] if initial_item is not None else (find_docker_databases() or [])
 
     main_items = []
     if cli_item:
@@ -188,6 +201,8 @@ def main():
     direct_launch = True if cli_item else False
 
     while True:
+        if initial_item is not None and not direct_launch:
+            break
         if not direct_launch:
             selected_db, db_idx = select_menu_item(
                 "Interactive Database Browser & Explorer",
@@ -872,7 +887,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
+    except KeyboardInterrupt:
+        exit_cleanup()
+        sys.exit(130)
     except Exception as e:
         exit_cleanup()
         print(f"\n{RED}{BOLD}Startup Error:{RESET} {e}\n")

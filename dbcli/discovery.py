@@ -55,6 +55,7 @@ def find_docker_databases(
             capture_output=True,
             text=True,
             check=True,
+            timeout=5,
         )
         output = getattr(result, "stdout", "") or ""
         for line in output.strip().splitlines():
@@ -82,6 +83,6 @@ def find_docker_databases(
                     "engine": engine,
                 }
             )
-    except (OSError, subprocess.CalledProcessError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, TypeError, ValueError, json.JSONDecodeError):
         return None
     return containers
