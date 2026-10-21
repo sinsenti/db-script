@@ -94,7 +94,7 @@ pub fn draw(f: &mut Frame, a: &App) {
         Tabs::new(["1 Data", "2 SQL", "3 Schema", "4 Inspect"])
             .select(index)
             .highlight_style(Style::default().fg(ACCENT).bold())
-            .block(block(" Views ", a.focus == Focus::Tabs)),
+            .block(block(" Views · 1/2/3/4 ", false)),
         main[0],
     );
     match a.view {
@@ -129,7 +129,8 @@ pub fn draw(f: &mut Frame, a: &App) {
                 }),
             ),
             Line::styled(
-                " Tab focus  / filter  : SQL  a/e/E edit  dd delete  x/X export  ? help  q back ",
+                format!(" {} · Tab tables/rows  / filter  : SQL  a/e/E edit  dd delete  x/X export  ? help  q back ",
+                    if a.focus == Focus::Sidebar { "Tables focused" } else { "Rows focused" }),
                 Style::default().fg(MUTED),
             ),
         ]),

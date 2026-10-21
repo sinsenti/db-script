@@ -34,7 +34,7 @@ def main():
      else:os.environ['DBCLI_POSTGRES_URL']=previous
     t.kind=args.kind;paths=[];child=None
     try:
-     assert t.wait(lambda:b'alpha'in t.output),'initial PG rows missing';t.send('E');assert t.wait(lambda:nvim_child(t.proc.pid)is not None),'Neovim not launched';child,paths=nvim_child(t.proc.pid);assert len(paths)==2
+     assert t.wait(lambda:b'alpha'in t.output),'initial PG rows missing';t.send('\t')if args.kind=='ratatui'and b'Tables focused'in t.output else None;t.send('E');assert t.wait(lambda:nvim_child(t.proc.pid)is not None),'Neovim not launched';child,paths=nvim_child(t.proc.pid);assert len(paths)==2
      assert t.wait(lambda:b'original.json'in t.output and b'edited.json'in t.output),'diff not ready'
      document=json.loads(paths[0].read_text());assert all(set(entry['original'])=={'id'}for entry in document['updates']),'full original snapshot duplicated in editor file'
      assert all('payload'in entry['row']for entry in document['updates']),'typed editable rows missing'

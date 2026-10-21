@@ -45,6 +45,11 @@ while a worker is waiting on a read or protocol response. During a pending write
 q waits for the transaction result; forced Ctrl+C/signal exit reports an unknown
 outcome rather than claiming rollback.
 
+New database sessions start with focus on the table sidebar. Use j/k to choose a
+table and Enter/l to open its rows. Tab (or Shift+Tab) switches only between the
+sidebar and row pane; the view bar is not a focus stop. From the row pane, 1/2/3/4
+still selects Data/SQL/Schema/Inspect.
+
 `?` opens a sectioned keyboard guide with one shortcut or related key group per
 line, aligned descriptions and a scroll position indicator. Use j/k, Ctrl+D/U or
 g/G to move through it; Esc/q closes it.
@@ -55,7 +60,7 @@ to scroll entries, Ctrl+D/U to page, and g/G to jump to the first/last entry.
 
 | Control | Action |
 | --- | --- |
-| Tab | Cycle grid, view tabs, sidebar focus |
+| Tab / Shift+Tab | Switch between table sidebar and table rows |
 | j/k, arrows | Row, sidebar, chooser or inspector navigation |
 | H/L, left/right | Column focus with horizontal scrolling |
 | Enter/l | Row detail; Enter chooses sidebar/format/FK item |

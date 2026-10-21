@@ -71,7 +71,9 @@ outside this tool's scope.
   metadata work and SQL wrappers can otherwise differ.
 - **UI:** startup to a completed stable frame, `E` to editor launch and actual
   Neovim readiness, in-Neovim unsaved diff rendering, whole-process-tree sampled
-  CPU/RSS and exact terminal/alternate-screen restoration. The all-thread process
+  CPU/RSS and exact terminal/alternate-screen restoration. Current UI builds start
+  in the table list; the harness moves focus to rows before the E timer starts.
+  The all-thread process
   collector runs automatically every 20ms; a second terminal is unnecessary.
 - **Distribution:** executable sizes and SHA-256, source/lockfile/harness hashes;
   artifacts must remain unchanged throughout a run. Python/package, PostgreSQL

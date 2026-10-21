@@ -13,7 +13,6 @@ pub enum View {
 pub enum Focus {
     Sidebar,
     Grid,
-    Tabs,
 }
 #[derive(Clone, Debug)]
 pub enum Edit {
@@ -127,7 +126,7 @@ impl App {
             hidden: HashSet::new(),
             marks: BTreeMap::new(),
             view: View::Data,
-            focus: Focus::Grid,
+            focus: Focus::Sidebar,
             modal: None,
             status: "Starting native worker…".into(),
             busy: true,
@@ -643,11 +642,10 @@ impl App {
             self.modal = Some(Modal::Help { scroll: 0 });
             return;
         }
-        if key.code == K::Tab {
+        if matches!(key.code, K::Tab | K::BackTab) {
             self.focus = match self.focus {
                 Focus::Sidebar => Focus::Grid,
-                Focus::Grid => Focus::Tabs,
-                Focus::Tabs => Focus::Sidebar,
+                Focus::Grid => Focus::Sidebar,
             };
             return;
         }
@@ -673,6 +671,9 @@ impl App {
                 }
                 K::Enter | K::Char('l') if self.focus == Focus::Sidebar => {
                     if let Some(table) = self.table_names().get(self.table_cursor).cloned() {
+                        self.history.clear();
+                        self.view = View::Data;
+                        self.focus = Focus::Grid;
                         self.load(
                             Spec {
                                 table,
@@ -713,15 +714,6 @@ impl App {
                         );
                     }
                 }
-                _ => {}
-            }
-            return;
-        }
-        if self.focus == Focus::Tabs {
-            match key.code {
-                K::Char('j') | K::Right | K::Char('L') => self.switch_view(1, db),
-                K::Char('k') | K::Left | K::Char('H') => self.switch_view(-1, db),
-                K::Enter => self.focus = Focus::Grid,
                 _ => {}
             }
             return;
@@ -918,22 +910,6 @@ impl App {
                 })
             }
             _ => {}
-        }
-    }
-    fn switch_view(&mut self, delta: isize, db: &Async) {
-        let n = match self.view {
-            View::Data => 0,
-            View::Sql => 1,
-            View::Schema => 2,
-            View::Inspect => 3,
-        };
-        self.view = [View::Data, View::Sql, View::Schema, View::Inspect]
-            [(n + delta).rem_euclid(4) as usize];
-        if self.view == View::Inspect {
-            self.submit(Job::Inspect(self.spec.table.clone()), db)
-        }
-        if self.view == View::Sql {
-            self.input(Edit::Sql, self.draft.clone());
         }
     }
     fn run_sql(&mut self, text: String, db: &Async) {
@@ -1396,7 +1372,7 @@ H/L ←/→\tFocus a data column
 gg/G\tJump to the first / last row
 Ctrl+D/U\tPage down / up
 Enter/l\tOpen row details or choose an item
-Tab\tCycle sidebar, grid and view tabs
+Tab/Shift+Tab\tSwitch between the table list and table rows
 1/2/3/4\tShow Data / SQL / Schema / Inspect
 h/q\tGo back or quit
 Esc\tClose a modal, or cancel a pending read

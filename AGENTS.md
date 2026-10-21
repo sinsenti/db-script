@@ -171,6 +171,8 @@ skips separately from passes; an unavailable server can also cause a skip.
 ## Python reference UI behavior and known gaps
 
 For the default Rust interface use `ui/rust/README.md` and `RUST.md`.
+Rust sessions start focused on the table sidebar. Tab/Shift+Tab toggles only
+sidebar/rows; numbered view shortcuts remain available from the row pane.
 Its `?` guide has one shortcut/group per row; schema/inspector tables keep headers
 visible while scrolling entries and wrap values within aligned cells.
 Built-in Rust text prompts support Ctrl+W to delete the preceding word, including

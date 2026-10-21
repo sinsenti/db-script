@@ -58,7 +58,7 @@ def main():
    else:cmd+=[str(db),'items']
    t=Terminal(cmd,folder);t.kind=args.kind;paths=[];child=None
    try:
-    assert t.wait(lambda:b'alpha'in t.output),'initial data missing';t.send('E');assert t.wait(lambda:nvim_child(t.proc.pid)is not None),'Neovim did not launch';child,paths=nvim_child(t.proc.pid);assert len(paths)==2
+    assert t.wait(lambda:b'alpha'in t.output),'initial data missing';t.send('\t')if args.kind=='ratatui'and b'Tables focused'in t.output else None;t.send('E');assert t.wait(lambda:nvim_child(t.proc.pid)is not None),'Neovim did not launch';child,paths=nvim_child(t.proc.pid);assert len(paths)==2
     for p in paths:assert p.stat().st_mode&0o777==0o600
     assert paths[0].parent==paths[1].parent and paths[0].parent.stat().st_mode&0o777==0o700
     assert t.wait(lambda:b'original.json'in t.output and b'edited.json'in t.output),'Neovim diff not displayed'

@@ -29,6 +29,7 @@ def main():
         terminal = Terminal(command,folder);terminal.kind = args.kind
         try:
             assert terminal.wait(lambda:b'alpha' in terminal.output),'initial rows missing'
+            if args.kind=='ratatui' and b'Tables focused' in terminal.output:terminal.send('\t')
             terminal.send('x')
             if args.kind=='original':
                 assert terminal.wait(lambda:b'File exists. New export name' in terminal.output),'overwrite did not offer a new name'

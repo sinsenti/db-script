@@ -227,6 +227,7 @@ def ui_case(action, args, data):
             t.send(':'); external({'text': text}); t.send(b'\x12')
         try:
             assert t.wait(ready), 'initial UI rows missing'
+            if 'Tables focused' in t.display:t.send('\t')
             # An UPDATE can move a fixture tuple; choose deterministic PK order.
             t.send('o')
             assert t.wait(lambda: ready() and 'id ↑' in t.display), 'PK sort not loaded'

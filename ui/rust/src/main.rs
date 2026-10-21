@@ -23,7 +23,7 @@ fn config() -> Result<Config, String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--help" | "-h" => {
-                println!("dbcli-ui-rust — Ratatui database browser\n\n--engine sqlite|postgres --database PATH --table NAME\n--backend original-rust|codex-rust|pi-rust|integrated-rust --worker PATH\n--read-only (disable all mutations)\n\nTab sidebar/grid/views · / filter · : SQL · Ctrl+R run/preview · Ctrl+G editor\nEsc cancels a pending read; newer reads supersede old results\na/e/E SQLite/PostgreSQL JSON edits · dd atomic deletion · x/X exports · ? help");
+                println!("dbcli-ui-rust — Ratatui database browser\n\n--engine sqlite|postgres --database PATH --table NAME\n--backend original-rust|codex-rust|pi-rust|integrated-rust --worker PATH\n--read-only (disable all mutations)\n\nTab sidebar/grid · / filter · : SQL · Ctrl+R run/preview · Ctrl+G editor\nEsc cancels a pending read; newer reads supersede old results\na/e/E SQLite/PostgreSQL JSON edits · dd atomic deletion · x/X exports · ? help");
                 std::process::exit(0)
             }
             "--version" => {
