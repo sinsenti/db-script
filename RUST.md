@@ -146,7 +146,9 @@ in this checkout; those tables do not measure the latest main build.
 The backend was the fastest measured full-table reader (128.2 ms for 771 quotes)
 and had the lowest measured bulk worker CPU. The full Rust bulk UI still uses more
 memory than the Go/Python UIs; selection does not imply a win on every metric.
-Comparison branches, binaries and reports remain preserved in their worktrees.
+Comparison branches and reports remain preserved in Git. Removed Rust worktrees
+and their release binaries have a private archive; see the
+[review and recovery guide](docs/comparison/worktree-cleanup.md).
 
 ## Export destinations
 

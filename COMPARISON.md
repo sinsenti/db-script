@@ -186,6 +186,8 @@ Remaining limits of the comparison:
 
 The [archived quotes report](docs/comparison/quotes-2026-10-20.md) keeps all result
 tables and method caveats in main, without requiring the old worktrees.
+The [Rust worktree review and recovery guide](docs/comparison/worktree-cleanup.md)
+records subsequent cleanup, preserved branches/binaries and how to restore them.
 Full historical reports and raw evidence remain in commit
 `a44b69c56c7cbd622786e3a4ca897bee89133fcc`:
 
