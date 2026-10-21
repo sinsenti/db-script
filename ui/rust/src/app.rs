@@ -98,6 +98,8 @@ pub struct App {
     pub height: u16,
     history: Vec<Spec>,
     last: Option<char>,
+    pending: Option<u64>,
+    tables_loaded: bool,
 }
 impl App {
     pub fn new(c: Config) -> Self {
@@ -135,6 +137,8 @@ impl App {
             height: 35,
             history: vec![],
             last: None,
+            pending: None,
+            tables_loaded: false,
         }
     }
     pub fn read_only(&self) -> bool {
@@ -157,18 +161,49 @@ impl App {
         identity(row, &self.meta.keys).unwrap_or_else(|_| row.to_string())
     }
     pub fn submit(&mut self, job: Job, db: &Async) {
+        if self.write_pending {
+            self.status = "Transaction pending: wait for its outcome".into();
+            return;
+        }
         let write = matches!(&job, Job::Apply(..));
-        if db.send.send(job).is_ok() {
-            if write {
-                self.write_pending = true;
+        match db.send.send(job) {
+            Ok(id) => {
+                self.pending = Some(id);
+                self.write_pending = write;
+                self.busy = true;
+                self.status = if write {
+                    "Transaction pending…"
+                } else {
+                    "Working… Esc cancels read; / or : starts a newer search"
+                }
+                .into();
             }
-            self.busy = true;
-            self.status = "Working… (q remains responsive)".into()
+            Err(e) => {
+                self.pending = None;
+                self.busy = false;
+                self.status = e;
+            }
+        }
+    }
+    fn cancel_read(&mut self, db: &Async) {
+        if db.cancel_read() {
+            self.pending = None;
+            self.busy = false;
+            self.status = "Read cancelled; browser remains open. Ctrl+P → refresh to retry".into();
+        }
+    }
+    fn refresh(&mut self, db: &Async) {
+        if !self.tables_loaded {
+            self.submit(Job::Init, db);
         } else {
-            self.status = "Worker stopped".into()
+            self.load(self.spec.clone(), db);
         }
     }
     pub fn load(&mut self, spec: Spec, db: &Async) {
+        if self.write_pending {
+            self.status = "Transaction pending: wait for its outcome".into();
+            return;
+        }
         if spec.table != self.spec.table || spec.raw != self.spec.raw {
             self.hidden.clear();
             self.marks.clear();
@@ -185,10 +220,20 @@ impl App {
         self.page = Page::default();
         self.submit(Job::Load(spec), db);
     }
-    pub fn receive(&mut self, r: Reply, db: &Async) {
+    pub fn receive(&mut self, completion: Completion, db: &Async) {
+        // Check before changing busy/status, opening editors, or acknowledging writes.
+        if self.pending != Some(completion.id) {
+            return;
+        }
+        self.pending = None;
+        if self.write_pending {
+            db.acknowledge_write(completion.id);
+        }
         self.busy = false;
+        let r = completion.reply;
         match r {
             Reply::Init(t) => {
+                self.tables_loaded = true;
                 self.tables = t;
                 if self.spec.table.is_empty() {
                     if let Some(t) = self.tables.first() {
@@ -512,6 +557,14 @@ impl App {
             self.quit = true;
             return;
         }
+        if self.busy && !self.write_pending && key.code == K::Esc && self.modal.is_none() {
+            self.cancel_read(db);
+            return;
+        }
+        if self.write_pending {
+            self.status = "Transaction pending: wait for its outcome; Ctrl+C forces exit".into();
+            return;
+        }
         if self.modal.is_some() {
             self.modal_key(key, db);
             return;
@@ -542,7 +595,42 @@ impl App {
             return;
         }
         if self.busy {
-            self.status = "Busy; q/Esc can exit, database work never runs in render".into();
+            // Only read controls are available until a current result is installed.
+            match key.code {
+                K::Char('/') => {
+                    let (kind, text) = if self.focus == Focus::Sidebar {
+                        (Edit::Search, self.table_filter.clone())
+                    } else {
+                        (Edit::Filter, self.spec.filter.clone())
+                    };
+                    self.input(kind, text);
+                }
+                K::Char(':') | K::Char('2') => self.input(Edit::Sql, self.draft.clone()),
+                K::Char('r') if ctrl => self.run_sql(self.draft.clone(), db),
+                K::Char('j') | K::Down if self.focus == Focus::Sidebar => {
+                    self.table_cursor =
+                        (self.table_cursor + 1).min(self.table_names().len().saturating_sub(1));
+                }
+                K::Char('k') | K::Up if self.focus == Focus::Sidebar => {
+                    self.table_cursor = self.table_cursor.saturating_sub(1);
+                }
+                K::Enter | K::Char('l') if self.focus == Focus::Sidebar => {
+                    if let Some(table) = self.table_names().get(self.table_cursor).cloned() {
+                        self.load(
+                            Spec {
+                                table,
+                                limit: self.spec.limit,
+                                ..Spec::default()
+                            },
+                            db,
+                        );
+                    }
+                }
+                _ => {
+                    self.status =
+                        "Read pending: Esc cancels; / filter or : SQL supersedes it".into()
+                }
+            }
             return;
         }
         if self.focus == Focus::Sidebar {
@@ -1076,7 +1164,7 @@ impl App {
                         action = matching[0].to_string();
                     }
                 }
-                match action.as_str(){"help"=>self.modal=Some(Modal::Text{title:"Keyboard help".into(),text:HELP.into(),scroll:0,detail:false}),"data"=>self.view=View::Data,"sql"=>self.input(Edit::Sql,self.draft.clone()),"schema"=>self.view=View::Schema,"inspect"=>self.submit(Job::Inspect(self.spec.table.clone()),db),"filter"=>self.input(Edit::Filter,self.spec.filter.clone()),"insert"=>self.insert(),"edit"=>self.edit(),"bulk"=>self.bulk(db),"delete"=>self.delete(),"export"=>self.export("json".into(),db),"tables"=>self.focus=Focus::Sidebar,"refresh"=>self.load(self.spec.clone(),db),"quit"=>self.quit=true,_=>return Err("Commands: data sql schema inspect filter insert edit bulk delete export tables refresh quit".into())}
+                match action.as_str(){"help"=>self.modal=Some(Modal::Text{title:"Keyboard help".into(),text:HELP.into(),scroll:0,detail:false}),"data"=>self.view=View::Data,"sql"=>self.input(Edit::Sql,self.draft.clone()),"schema"=>self.view=View::Schema,"inspect"=>self.submit(Job::Inspect(self.spec.table.clone()),db),"filter"=>self.input(Edit::Filter,self.spec.filter.clone()),"insert"=>self.insert(),"edit"=>self.edit(),"bulk"=>self.bulk(db),"delete"=>self.delete(),"export"=>self.export("json".into(),db),"tables"=>self.focus=Focus::Sidebar,"refresh"=>self.refresh(db),"quit"=>self.quit=true,_=>return Err("Commands: data sql schema inspect filter insert edit bulk delete export tables refresh quit".into())}
             }
         }
         Ok(())
@@ -1134,20 +1222,13 @@ pub const COMMANDS: [&str; 14] = [
     "tables", "refresh", "quit", "help",
 ];
 
-pub const HELP:&str="NAVIGATION\nj/k or arrows: rows · H/L: columns · Enter/l: full row detail\ngg/G: first/last · Ctrl+D/U: page · Tab: sidebar/grid/tabs\nh/q: back or quit · Esc: cancel modal · Ctrl+C: quit\n\nREADS\n/: filter · :: SQL editor · Ctrl+R: run SQL / accept JSON\nCtrl+G: external editor · Tab in editor: completion\no/O: sort ASC/DESC · v: visibility · Space: stable marks\nf: grouped FK chooser · S: schema · I: indexes/constraints/triggers\nx: JSON export · X: JSON/CSV/SQL format menu\nExports: marked rows or up to 100000 filtered/sorted rows\n\nWRITES (SQLite/PostgreSQL writable screens)\na: insert object or array · e: edit current original row\nE: Neovim diff for explicit atomic updates/insert/delete; :wqa then count confirmation, :cq cancels\ndd: delete current/marked rows · Ctrl+R: review JSON edits\nPreview: j/k/Ctrl+D/U/G scroll full diff · y: confirm\nDeletion preview: type DELETE then y · Esc/q cancels\n\nCtrl+P command palette: data sql schema inspect filter insert\nedit bulk delete export tables refresh quit\n\nPostgreSQL raw queries use server-read-only transactions; --read-only disables all mutations.";
+pub const HELP:&str="NAVIGATION\nj/k or arrows: rows · H/L: columns · Enter/l: full row detail\ngg/G: first/last · Ctrl+D/U: page · Tab: sidebar/grid/tabs\nh/q: back or quit · Esc: cancel modal/read · Ctrl+C: quit\n\nREADS\nEsc: stop pending read without closing browser; newer reads supersede old results\n/: filter · :: SQL editor · Ctrl+R: run SQL / accept JSON\nCtrl+G: external editor · Tab in editor: completion\no/O: sort ASC/DESC · v: visibility · Space: stable marks\nf: grouped FK chooser · S: schema · I: indexes/constraints/triggers\nx: JSON export · X: JSON/CSV/SQL format menu\nExports: marked rows or up to 100000 filtered/sorted rows\n\nWRITES (SQLite/PostgreSQL writable screens)\na: insert object or array · e: edit current original row\nE: Neovim diff for explicit atomic updates/insert/delete; :wqa then count confirmation, :cq cancels\ndd: delete current/marked rows · Ctrl+R: review JSON edits\nPreview: j/k/Ctrl+D/U/G scroll full diff · y: confirm\nDeletion preview: type DELETE then y · Esc/q cancels\n\nCtrl+P command palette: data sql schema inspect filter insert\nedit bulk delete export tables refresh quit\n\nPostgreSQL raw queries use server-read-only transactions; --read-only disables all mutations.";
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn text_modals_support_prompt_line_editing() {
-        let (tx, _) = std::sync::mpsc::channel();
-        let (_, rx) = std::sync::mpsc::channel();
-        let db = Async {
-            send: tx,
-            receive: rx,
-            pid: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            control: std::sync::Arc::new(crate::bridge::Control::default()),
-        };
+        let db = Async::disconnected();
         let mut a = App::new(Config::default());
         a.input(Edit::Filter, "export.json".into());
         a.key(KeyEvent::new(K::Char('a'), M::CONTROL), &db);

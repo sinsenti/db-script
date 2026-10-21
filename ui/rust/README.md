@@ -51,7 +51,8 @@ outcome rather than claiming rollback.
 | j/k, arrows | Row, sidebar, chooser or inspector navigation |
 | H/L, left/right | Column focus with horizontal scrolling |
 | Enter/l | Row detail; Enter chooses sidebar/format/FK item |
-| h/q, Esc | Back/quit; cancel a modal without applying it |
+| h/q | Back/quit |
+| Esc | Close modal; otherwise cancel pending read without exiting, or back when idle |
 | gg/G, Ctrl+D/U | First/last row and paging |
 | / | Filter data; search tables when sidebar focused |
 | : or 2 | Open multiline SQL editor |
@@ -80,6 +81,37 @@ jumps within the current result. The SQL draft is retained when its modal closes
 it, nvim/vim/nano are tried. Temporary files are mode 0600 and removed after
 success, failure or handled cancellation. The terminal is restored before editor
 handoff and on normal exit, errors, panic and handled INT/TERM/HUP.
+
+## Worker I/O and read cancellation
+
+While a read is pending, Esc stops it and keeps the browser open. A modal consumes
+the first Esc. New filter/SQL submissions and sidebar table selections supersede
+older reads. The background queue skips obsolete queued work, checks cancellation
+between pipe polls, and stamps each completion with a request ID. The UI checks
+that ID before changing any state, including errors and editor/export handoffs.
+Confirmed writes stay gated until the UI receives their result; read cancellation
+and new submissions cannot interrupt them.
+
+A cancelled, oversized, malformed or timed-out exchange discards and reaps its
+worker. The next request starts a fresh process with fresh metadata caches. No
+operation is retried automatically. Cancelling closes the database connection;
+PostgreSQL's current server statement may run until disconnect detection or its
+existing timeout rather than receiving a server cancellation acknowledgment.
+Ctrl+P → `refresh` retries the current view or cancelled initial discovery.
+
+Default request/response caps are **128 MiB each**, excluding JSONL's newline;
+the total write/read I/O deadline is **60 seconds per exchange**, including
+blocked pipe writes. Startup ready handshakes have the same deadline. Partial
+response progress does not extend it. Configure positive
+`DBCLI_WORKER_MAX_REQUEST_BYTES` / `DBCLI_WORKER_MAX_RESPONSE_BYTES` (up to 1 GiB)
+and `DBCLI_WORKER_DEADLINE_MS` (up to 600000 ms) in the environment. Invalid values
+are rejected before worker startup. These cap serialized frames, not backend
+allocations, parsed JSON memory or the total multi-request job duration.
+
+Writes use the same I/O deadline. If their confirmation is lost, the UI keeps the
+existing unconfirmed-outcome warning; it never claims rollback or retries the
+write. Refresh/inspect before any retry. PostgreSQL query/lock timeouts and
+transactional snapshot checks remain separate. See [RUST.md](../../RUST.md).
 
 ## Neovim bulk editor
 
@@ -203,8 +235,8 @@ part of this contract. Completion is contextual, not a complete SQL grammar.
 ## Architecture
 
 - `bridge.rs`: dispatch, batch and rewrite JSONL envelopes; mutation/byte-tag
-  translation; structured errors; independent owned-child cancellation/reaping.
-- `data.rs`: background request queue, cached PK/schema/FK metadata, bounded result
+  translation; capped nonblocking pipe I/O, absolute deadlines, owned-child reaping.
+- `data.rs`: request generations, cancellation, gated writes, cached PK/schema/FK metadata, bounded result
   composition, typed values, atomic plan validation and JSON/CSV/SQL exports.
 - `app.rs`: event-driven state, nested browser stack, modals, drafts, marks and
   confirmation. Raw snapshots remain separate from editable JSON.

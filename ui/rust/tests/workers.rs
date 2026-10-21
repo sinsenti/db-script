@@ -54,7 +54,11 @@ fn disposable_native_workers() {
                 ..Spec::default()
             }))
             .unwrap();
-        let r = db.receive.recv_timeout(Duration::from_secs(15)).unwrap();
+        let r = db
+            .receive
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap()
+            .reply;
         if let Reply::Loaded(b) = r {
             assert_eq!(b.meta.keys, vec!["id"]);
             assert_eq!(b.meta.relations.len(), 1);
@@ -72,7 +76,12 @@ fn disposable_native_workers() {
                 ..Spec::default()
             }))
             .unwrap();
-        match db.receive.recv_timeout(Duration::from_secs(10)).unwrap() {
+        match db
+            .receive
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .reply
+        {
             Reply::Loaded(b) => assert_eq!(b.page.rows, vec![vec![json!(1)]]),
             other => panic!("{alias}: SQL without selected table failed {other:?}"),
         };
@@ -167,7 +176,11 @@ fn disposable_postgres_worker_reads() {
                 ..Spec::default()
             }))
             .unwrap();
-        let reply = db.receive.recv_timeout(Duration::from_secs(20)).unwrap();
+        let reply = db
+            .receive
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap()
+            .reply;
         if let Reply::Loaded(b) = reply {
             assert_eq!(b.page.rows.len(), 8, "{alias}");
             assert_eq!(b.meta.keys, vec!["id"]);
@@ -192,7 +205,11 @@ fn disposable_postgres_worker_reads() {
                 ..Spec::default()
             }))
             .unwrap();
-        let reply = db.receive.recv_timeout(Duration::from_secs(20)).unwrap();
+        let reply = db
+            .receive
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap()
+            .reply;
         if let Reply::Loaded(b) = reply {
             assert_eq!(b.meta.relations.len(), 1);
             assert_eq!(b.meta.relations[0].pairs.len(), 2);

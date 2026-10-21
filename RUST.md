@@ -79,6 +79,46 @@ and [Ratatui controls](ui/rust/README.md). Bulk editing is bounded to 100,000 ro
 and holds data in memory. PostgreSQL TLS-required endpoints and interactive MySQL
 browsing are unsupported. Raw SQL remains read-only in writable sessions.
 
+## Cancelling reads and worker limits
+
+In the default Ratatui browser, **Esc cancels a pending read without exiting**.
+If a modal is open, the first Esc closes the modal; the next cancels the read.
+You can also submit a new `/` filter, `:` SQL query, or sidebar table selection
+while a read is running. The newer request supersedes the earlier one. Replies
+carry UI request IDs; stale successes and errors cannot change rows, status,
+busy state, or open a bulk editor/export prompt. Ctrl+P → `refresh` retries the
+current view (or table discovery if it was cancelled at startup).
+
+Cancellation terminates and reaps the owned worker and closes its database
+connection. The next read starts a fresh worker; a partial or late protocol frame
+is never reused. PostgreSQL can continue an in-flight server statement until it
+observes the disconnect or reaches its existing server timeout. This is worker
+cancellation, not a PostgreSQL CancelRequest acknowledgment.
+
+The native UI bounds JSONL transport before parsing each response:
+
+| Environment variable | Default | Accepted range |
+| --- | --- | --- |
+| `DBCLI_WORKER_MAX_RESPONSE_BYTES` | 134217728 (128 MiB) | 1–1073741824 bytes |
+| `DBCLI_WORKER_MAX_REQUEST_BYTES` | 134217728 (128 MiB) | 1–1073741824 bytes |
+| `DBCLI_WORKER_DEADLINE_MS` | 60000 (60 seconds) | 1–600000 ms |
+
+The deadline covers the complete nonblocking request write and response read;
+it also bounds startup handshakes. Receiving occasional bytes does not reset it.
+Frames are measured without the terminating newline. Oversized/truncated/invalid
+responses, blocked writes and expired deadlines produce an error, discard the
+worker and leave the browser available for another request. Invalid settings fail
+before spawning a worker. Limits bound serialized transport, not total application
+or backend memory; the 100,000-row bulk/export limit still applies separately.
+These settings apply to Ratatui's worker bridge, not the synchronous `--legacy`
+interface or Python reference browser.
+
+Confirmed writes cannot be cancelled or superseded by a newer read. They have the
+same I/O deadline; a timeout or forced exit may leave their outcome unconfirmed.
+The UI reports this explicitly and never automatically retries a write. Refresh
+and inspect the database before retrying. PostgreSQL statement/lock timeouts and
+atomic mutation validation remain in effect independently.
+
 ## Verification
 
 ```bash

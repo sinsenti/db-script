@@ -86,32 +86,85 @@ pub enum Reply {
     Applied(Value),
     Error(String),
 }
+#[derive(Debug)]
+pub struct Completion {
+    pub id: u64,
+    pub reply: Reply,
+}
+pub struct Request {
+    id: u64,
+    job: Job,
+}
+pub struct Sender {
+    tx: mpsc::Sender<Request>,
+    control: std::sync::Arc<crate::bridge::Control>,
+}
+impl Sender {
+    /// Every submission supersedes older reads; confirmed writes are never superseded.
+    pub fn send(&self, job: Job) -> Result<u64> {
+        use std::sync::atomic::Ordering;
+        let _guard = self
+            .control
+            .submitting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.control.stopped.load(Ordering::Acquire) {
+            return Err("Worker stopped".into());
+        }
+        if self.control.writing.load(Ordering::Acquire) {
+            return Err("Transaction pending: wait for its outcome".into());
+        }
+        let write = matches!(&job, Job::Apply(..));
+        let id = self.control.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if write {
+            self.control.writing.store(true, Ordering::Release);
+        }
+        if self.tx.send(Request { id, job }).is_err() {
+            self.control.writing.store(false, Ordering::Release);
+            return Err("Worker stopped".into());
+        }
+        Ok(id)
+    }
+}
 pub struct Async {
-    pub send: mpsc::Sender<Job>,
-    pub receive: mpsc::Receiver<Reply>,
+    pub send: Sender,
+    pub receive: mpsc::Receiver<Completion>,
     pub pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub control: std::sync::Arc<crate::bridge::Control>,
 }
 impl Async {
     pub fn start(config: Config) -> Self {
-        let (tx, rx) = mpsc::channel();
+        use std::sync::atomic::Ordering;
+        let (tx, rx) = mpsc::channel::<Request>();
         let (out, input) = mpsc::channel();
         let pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let shared = pid.clone();
         let control = std::sync::Arc::new(crate::bridge::Control::default());
         let child_control = control.clone();
         std::thread::spawn(move || {
-            let mut worker = match Worker::spawn_controlled(config.clone(), Some(&child_control)) {
-                Ok(w) => w,
-                Err(e) => {
-                    let _ = out.send(Reply::Error(e));
-                    return;
-                }
-            };
-            shared.store(worker.pid(), std::sync::atomic::Ordering::Release);
+            let mut active: Option<Worker> = None;
             let mut cache = HashMap::new();
-            for job in rx {
-                let r = (|| -> Result<Reply> {
+            for Request { id, job } in rx {
+                if child_control.stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let write = matches!(&job, Job::Apply(..));
+                if !write && child_control.generation.load(Ordering::Acquire) != id {
+                    continue;
+                }
+                let result = (|| -> Result<Reply> {
+                    if active.is_none() {
+                        active = Some(Worker::spawn_request(
+                            config.clone(),
+                            Some(&child_control),
+                            id,
+                            !write,
+                        )?);
+                        shared.store(active.as_ref().unwrap().pid(), Ordering::Release);
+                    }
+                    let worker = active.as_mut().unwrap();
+                    worker.context(id, !write);
+
                     Ok(match job {
                         Job::Init => Reply::Init(
                             serde_json::from_value(
@@ -123,9 +176,9 @@ impl Async {
                             let meta = if spec.table.is_empty() && spec.raw.is_some() {
                                 Meta::default()
                             } else {
-                                metadata(&mut worker, &config, &spec.table, &mut cache)?
+                                metadata(worker, &config, &spec.table, &mut cache)?
                             };
-                            let (page, total, meta) = fetch(&mut worker, &config, &spec, &meta)?;
+                            let (page, total, meta) = fetch(worker, &config, &spec, &meta)?;
                             Reply::Loaded(Bundle {
                                 spec,
                                 page,
@@ -133,18 +186,16 @@ impl Async {
                                 meta,
                             })
                         }
-                        Job::Inspect(table) => {
-                            Reply::Inspected(inspect(&mut worker, &config, &table)?)
-                        }
+                        Job::Inspect(table) => Reply::Inspected(inspect(worker, &config, &table)?),
                         Job::Fetch(mut spec, purpose) => {
                             spec.offset = 0;
                             spec.limit = 100000;
                             let m = if spec.table.is_empty() && spec.raw.is_some() {
                                 Meta::default()
                             } else {
-                                metadata(&mut worker, &config, &spec.table, &mut cache)?
+                                metadata(worker, &config, &spec.table, &mut cache)?
                             };
-                            let (p, _, m) = fetch(&mut worker, &config, &spec, &m)?;
+                            let (p, _, m) = fetch(worker, &config, &spec, &m)?;
                             Reply::Fetched(p, m, purpose)
                         }
                         Job::Apply(table, actions) => Reply::Applied(worker.request(
@@ -152,20 +203,76 @@ impl Async {
                         )?),
                     })
                 })();
-                if out.send(r.unwrap_or_else(Reply::Error)).is_err() {
+                if active.as_ref().is_some_and(Worker::failed) {
+                    active.take();
+                    shared.store(0, Ordering::Release);
+                    cache.clear();
+                }
+                if !write && child_control.generation.load(Ordering::Acquire) != id {
+                    // Also discard workers cancelled during post-response composition.
+                    active.take();
+                    shared.store(0, Ordering::Release);
+                    cache.clear();
+                    continue;
+                }
+                // Retain the write gate until its completion is acknowledged by the UI.
+                if out
+                    .send(Completion {
+                        id,
+                        reply: result.unwrap_or_else(Reply::Error),
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
         });
         Self {
-            send: tx,
+            send: Sender {
+                tx,
+                control: control.clone(),
+            },
             receive: input,
             pid,
             control,
         }
     }
+    pub fn cancel_read(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let _guard = self
+            .control
+            .submitting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.control.writing.load(Ordering::Acquire) {
+            return false;
+        }
+        self.control.generation.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+    pub(crate) fn acknowledge_write(&self, id: u64) {
+        use std::sync::atomic::Ordering;
+        if self.control.generation.load(Ordering::Acquire) == id {
+            self.control.writing.store(false, Ordering::Release);
+        }
+    }
     pub fn terminate(&self) {
         self.control.shutdown();
+    }
+    #[cfg(test)]
+    pub(crate) fn disconnected() -> Self {
+        let (tx, _) = mpsc::channel();
+        let (_, receive) = mpsc::channel();
+        let control = std::sync::Arc::new(crate::bridge::Control::default());
+        Self {
+            send: Sender {
+                tx,
+                control: control.clone(),
+            },
+            receive,
+            pid: Default::default(),
+            control,
+        }
     }
 }
 impl Drop for Async {

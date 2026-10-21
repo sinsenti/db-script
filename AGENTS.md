@@ -99,6 +99,17 @@ skips separately from passes; an unavailable server can also cause a skip.
   are rejected, and partial files are removed after failure. Native E files contain
   PK-only original/delete tokens plus complete editable rows. Full snapshots stay
   in memory and are expanded into changed actions before transactional validation.
+- Ratatui's worker bridge uses nonblocking pipes, 128 MiB request/response defaults
+  and an absolute 60-second I/O deadline (including blocked writes/startup ready).
+  DBCLI_WORKER_MAX_REQUEST_BYTES, DBCLI_WORKER_MAX_RESPONSE_BYTES and
+  DBCLI_WORKER_DEADLINE_MS configure bounded positive limits; see RUST.md.
+  Transport failures discard/reap the worker; the next request starts fresh.
+- Native UI reads carry generation IDs. New reads supersede older queued/in-flight
+  reads; Esc cancels a pending read without quitting (after closing a modal).
+  Reject stale completions before changing any UI state or opening editors.
+  Confirmed writes cannot be superseded/cancelled; keep their gate until the
+  matching completion is consumed. Timeout/forced-exit outcomes may be unknown;
+  never retry writes automatically or claim rollback from lost confirmation.
 - The remaining contracts in this section describe the Python reference paths
   (`--python`, `--cli`, or labeled MySQL entries), unless stated otherwise.
 - SQLite targets use `SQLiteAdapter`. Direct PostgreSQL/MySQL URLs prefer native

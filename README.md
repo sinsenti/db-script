@@ -22,6 +22,9 @@ No Python PostgreSQL driver or host `psql` is needed for the Rust flow.
 Closing the Rust browser returns to the picker; `q` in the picker exits. Sessions
 are writable by default. `E` opens a compact Neovim diff and confirms before writing; full conflict snapshots stay in memory. Rust JSON/CSV/SQL exports require a new filename and never overwrite an existing path.
 MySQL entries use the original Python browser and are labeled accordingly.
+In Rust, Esc cancels a pending read without closing the browser. A newer submitted
+filter/query supersedes the previous read. Worker responses have size limits and
+I/O deadlines; see [configuration and cancellation](RUST.md#cancelling-reads-and-worker-limits).
 
 Build the Rust executables once from this source checkout:
 

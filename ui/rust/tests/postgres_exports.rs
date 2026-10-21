@@ -26,7 +26,12 @@ fn disposable_ratatui_postgres_export_replays_generated_and_identity_columns() {
             ..Spec::default()
         }))
         .unwrap();
-    let Reply::Loaded(bundle) = db.receive.recv_timeout(Duration::from_secs(15)).unwrap() else {
+    let Reply::Loaded(bundle) = db
+        .receive
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap()
+        .reply
+    else {
         panic!("Failed loading disposable export fixture")
     };
     let folder = tempfile::tempdir().unwrap();
@@ -53,7 +58,12 @@ fn disposable_ratatui_postgres_export_replays_generated_and_identity_columns() {
             ..Spec::default()
         }))
         .unwrap();
-    let Reply::Loaded(bundle) = db.receive.recv_timeout(Duration::from_secs(15)).unwrap() else {
+    let Reply::Loaded(bundle) = db
+        .receive
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap()
+        .reply
+    else {
         panic!("Failed loading defaults fixture")
     };
     let path = folder.path().join("defaults.sql");
