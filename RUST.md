@@ -89,11 +89,16 @@ carry UI request IDs; stale successes and errors cannot change rows, status,
 busy state, or open a bulk editor/export prompt. Ctrl+P → `refresh` retries the
 current view (or table discovery if it was cancelled at startup).
 
-Cancellation terminates and reaps the owned worker and closes its database
-connection. The next read starts a fresh worker; a partial or late protocol frame
-is never reused. PostgreSQL can continue an in-flight server statement until it
-observes the disconnect or reaches its existing server timeout. This is worker
-cancellation, not a PostgreSQL CancelRequest acknowledgment.
+For the selected Original Rust PostgreSQL worker, cancellation first sends the
+current request ID over a private inherited Unix socket. The worker uses the
+driver's CancelToken to attempt a PostgreSQL CancelRequest for that read. The UI
+allows up to 350 ms for this attempt, then terminates/reaps the worker and closes
+its database connection. PostgreSQL does not acknowledge whether cancellation
+succeeded; disconnect detection and existing server timeouts remain fallbacks.
+Late IDs cannot target a newer read, and writable connections never register a
+read-cancellation token. Other backend/engine combinations discard the worker
+without this driver-level attempt. The next read starts a fresh worker; a partial
+or late protocol frame is never reused.
 
 The native UI bounds JSONL transport before parsing each response:
 
@@ -131,6 +136,22 @@ DBCLI_RUN_INTEGRATION=0 python3 -m unittest discover -s tests -q
 Mutation tests use disposable fixtures only. Live application databases must not
 be used as mutation fixtures. Optional PostgreSQL Neovim checks can use the marked
 fixture managed by `tools/postgres_write_fixture.py`; see the backend/UI test docs.
+
+The current-main PostgreSQL acceptance script covers CRUD, atomic rollback, typed
+values, read-only controls, driver cancellation, stale/queued IDs, protected writes,
+and actual UI cancellation/superseding/deadline flows. After building both Rust
+executables and installing the benchmark development requirements, run it only
+against the marked disposable fixture:
+
+```bash
+python3 tools/postgres_write_fixture.py start
+.local/performance-venv/bin/python ui/rust/tests/postgres_acceptance.py \
+  --fixture "$PWD/.local/postgres-write/fixture.json"
+python3 tools/postgres_write_fixture.py stop
+```
+
+`--cases` selects individual scenarios. The script rejects application endpoints,
+creates unique owned synthetic schemas and drops them after each scenario.
 
 ## Source selection
 

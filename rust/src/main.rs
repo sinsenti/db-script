@@ -62,6 +62,10 @@ fn main() {
                 process::exit(2)
             });
             if engine == RemoteEngine::Postgres {
+                if let Err(error) = dbcli_rust::pg_cancel::install() {
+                    eprintln!("{error}");
+                    process::exit(2);
+                }
                 let adapter = SQLiteAdapter::postgres(read_only);
                 run_protocol(|request| adapter.protocol(request));
             } else {
@@ -155,10 +159,33 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<ProtocolRequest>(&line) {
-            Ok(request) => dispatch(request),
-            Err(error) => {
-                json!({"ok":false,"error":{"class":"ProtocolError","message":error.to_string()},"trace":[]})
+        let response = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => {
+                let id = value.get("_request_id").and_then(Value::as_u64);
+                match serde_json::from_value::<ProtocolRequest>(value) {
+                    Ok(request) => {
+                        let operation = dbcli_rust::pg_cancel::begin(
+                            id,
+                            dbcli_rust::pg_cancel::is_read_operation(&request.op),
+                        );
+                        if operation.cancelled() {
+                            cancelled_response()
+                        } else {
+                            let response = dispatch(request);
+                            if operation.cancelled() && response["ok"] == true {
+                                cancelled_response()
+                            } else {
+                                response
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        json!({"ok":false,"error":{"class":"ProtocolError","message":"Invalid request"},"trace":[]})
+                    }
+                }
+            }
+            Err(_) => {
+                json!({"ok":false,"error":{"class":"ProtocolError","message":"Invalid JSON"},"trace":[]})
             }
         };
         if serde_json::to_writer(&mut stdout, &response).is_err()
@@ -168,6 +195,10 @@ where
             process::exit(1);
         }
     }
+}
+
+fn cancelled_response() -> Value {
+    json!({"ok":false,"error":{"class":"ReadCancelledError","message":"Read cancelled"},"trace":[]})
 }
 
 fn fail(error: dbcli_rust::DbError) -> ! {

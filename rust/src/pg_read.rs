@@ -70,6 +70,10 @@ impl Reader {
             .map_err(|_| error("AdapterError", "DBCLI_POSTGRES_URL is required"))?;
         let config = configuration_mode(&url, read_only)?;
         let mut client = config.connect(NoTls).map_err(db)?;
+        if read_only {
+            crate::pg_cancel::register_read(&client)
+                .map_err(|_| error("ReadCancelledError", "Read cancelled before execution"))?;
+        }
         client
             .batch_execute(if read_only {
                 "BEGIN READ ONLY"

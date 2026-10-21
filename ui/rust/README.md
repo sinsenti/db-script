@@ -104,9 +104,13 @@ and new submissions cannot interrupt them.
 
 A cancelled, oversized, malformed or timed-out exchange discards and reaps its
 worker. The next request starts a fresh process with fresh metadata caches. No
-operation is retried automatically. Cancelling closes the database connection;
-PostgreSQL's current server statement may run until disconnect detection or its
-existing timeout rather than receiving a server cancellation acknowledgment.
+operation is retried automatically. For Original Rust/PostgreSQL reads, a private
+inherited Unix socket carries the request ID to the worker, which attempts driver
+CancelRequest using its current read connection's token. The UI gives this attempt
+a 350 ms absolute grace budget, then kills/reaps the worker. PostgreSQL provides
+no cancellation-success acknowledgment; disconnect detection and server timeouts
+remain fallbacks. Stale IDs cannot cancel newer reads, and writable connections
+never register read-cancellation tokens. Other engines/backends use worker discard.
 Ctrl+P → `refresh` retries the current view or cancelled initial discovery.
 
 Default request/response caps are **128 MiB each**, excluding JSONL's newline;

@@ -28,3 +28,10 @@ E editor originals/deletes are compact PK tokens; retain complete immutable
 snapshots in memory and expand only requested actions before strict validators.
 Keep the duplicated export_file.rs and bulk_editor.rs modules aligned across
 rust/ and ui/rust/. Protocol apply_batch originals remain full snapshots.
+
+PostgreSQL protocol read cancellation uses pg_cancel and a private inherited Unix
+socket from the selected UI. Request IDs scope tokens to reads; stale IDs must not
+cancel newer work, and writable connections must never register tokens. The UI's
+350 ms cancellation grace remains bounded even if the driver cannot send its
+CancelRequest; it then kills/reaps the worker. Cancellation is best effort and
+must never imply rollback of a confirmed write.

@@ -111,6 +111,12 @@ skips separately from passes; an unavailable server can also cause a skip.
   Confirmed writes cannot be superseded/cancelled; keep their gate until the
   matching completion is consumed. Timeout/forced-exit outcomes may be unknown;
   never retry writes automatically or claim rollback from lost confirmation.
+- Original Rust/PostgreSQL reads additionally attempt driver CancelRequest through
+  a private inherited Unix socket carrying request IDs only. The UI waits at most
+  350 ms before discarding/reaping the worker. Ignore stale IDs; writable clients
+  must never register cancellation tokens. Server cancellation success is not
+  acknowledged. The optional ui/rust/tests/postgres_acceptance.py script requires
+  a marked disposable fixture and must never target an application database.
 - The remaining contracts in this section describe the Python reference paths
   (`--python`, `--cli`, or labeled MySQL entries), unless stated otherwise.
 - SQLite targets use `SQLiteAdapter`. Direct PostgreSQL/MySQL URLs prefer native

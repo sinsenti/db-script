@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     os::fd::{AsRawFd, RawFd},
+    os::unix::{net::UnixStream, process::CommandExt},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -56,6 +57,7 @@ pub fn command(config: &Config) -> Result<Command> {
     if config.read_only {
         c.arg("--read-only");
     }
+    c.env_remove("DBCLI_WORKER_CANCEL_FD");
     c.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -252,10 +254,57 @@ fn nonblocking(fd: RawFd) -> Result<()> {
     }
     Ok(())
 }
+/// Absolute grace budget, including partial frames and interrupted polls.
+fn attempt_cancel(socket: &mut UnixStream, id: u64) {
+    let frame = id.to_le_bytes();
+    let (mut sent, mut received) = (0, 0);
+    let mut receipt = [0u8; 8];
+    let deadline = Instant::now() + Duration::from_millis(350);
+    while Instant::now() < deadline {
+        let mut fd = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: if sent < frame.len() {
+                libc::POLLOUT
+            } else {
+                libc::POLLIN
+            },
+            revents: 0,
+        };
+        let ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .clamp(1, 25) as i32;
+        if unsafe { libc::poll(&mut fd, 1, ms) } <= 0 {
+            continue;
+        }
+        let result = if sent < frame.len() {
+            socket.write(&frame[sent..])
+        } else {
+            socket.read(&mut receipt[received..])
+        };
+        match result {
+            Ok(0) => return,
+            Ok(n) if sent < frame.len() => sent += n,
+            Ok(n) => {
+                received += n;
+                if received == receipt.len() {
+                    return;
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => return,
+        }
+    }
+}
 pub struct Worker {
     child: std::sync::Arc<std::sync::Mutex<Child>>,
     input: ChildStdin,
     output: ChildStdout,
+    cancel: Option<UnixStream>,
     control: Option<Arc<Control>>,
     generation: u64,
     cancellable: bool,
@@ -285,9 +334,34 @@ impl Worker {
             return Err("Worker startup cancelled".into());
         }
         let limits = Limits::environment()?;
-        let mut child = command(&config)?
+        let mut cmd = command(&config)?;
+        let (cancel, inherited) =
+            if config.engine == "postgres" && config.backend == "original-rust" {
+                let (parent, worker) =
+                    UnixStream::pair().map_err(|_| "Cannot create cancellation channel")?;
+                parent
+                    .set_nonblocking(true)
+                    .map_err(|_| "Cannot bound cancellation channel")?;
+                let fd = worker.as_raw_fd();
+                cmd.env("DBCLI_WORKER_CANCEL_FD", fd.to_string());
+                // Only this socket is intentionally inherited. The pre-exec closure
+                // performs async-signal-safe fcntl; it neither allocates nor locks.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                (Some(parent), Some(worker))
+            } else {
+                (None, None)
+            };
+        let mut child = cmd
             .spawn()
             .map_err(|_| "Could not start native worker; check --worker path".to_string())?;
+        drop(inherited);
         let input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
         let child = std::sync::Arc::new(std::sync::Mutex::new(child));
@@ -303,6 +377,7 @@ impl Worker {
             child,
             input,
             output,
+            cancel,
             config,
             serial: 0,
             generation,
@@ -445,22 +520,32 @@ impl Worker {
             return Err("ReadOnlyError: this screen cannot write".into());
         }
         self.serial += 1;
-        let request = envelope(&self.config, &op, self.serial)?;
+        let mut request = envelope(&self.config, &op, self.serial)?;
+        if self.cancel.is_some() {
+            request["_request_id"] = json!(self.serial);
+        }
+        let read = !["insert", "update", "delete", "apply_batch"]
+            .contains(&op["op"].as_str().unwrap_or(""));
         let f = family(&self.config.backend)?;
         let result = self.exchange(&request);
         if result.is_err() {
             // Partial frames cannot be reused: kill/reap, never retry this operation.
-            self.invalidate();
+            self.invalidate(self.cancellable && read);
         }
         let body = result?;
         if f == Family::Rewrite && body["id"].as_u64() != Some(self.serial) {
-            self.invalidate();
+            self.invalidate(self.cancellable && read);
             return Err("Mismatched worker response ID".into());
         }
         response(f, body)
     }
-    fn invalidate(&mut self) {
+    fn invalidate(&mut self, cancel_read: bool) {
         self.failed = true;
+        if cancel_read {
+            if let Some(socket) = &mut self.cancel {
+                attempt_cancel(socket, self.serial);
+            }
+        }
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
         let _ = child.kill();
         let _ = child.wait();
@@ -485,6 +570,43 @@ mod tests {
             backend: alias.into(),
             worker: PathBuf::from("worker"),
             ..Config::default()
+        }
+    }
+    #[test]
+    fn stalled_cancel_has_bounded_fallback_and_writes_send_no_cancel_frame() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("worker");
+        std::fs::write(&script, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for write in [false, true] {
+            let mut config = c("original-rust");
+            config.engine = "postgres".into();
+            config.worker = script.clone();
+            let mut worker = Worker::spawn(config).unwrap();
+            worker.limits.deadline = Duration::from_millis(50);
+            let (channel, mut observer) = UnixStream::pair().unwrap();
+            channel.set_nonblocking(true).unwrap();
+            observer
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            worker.cancel = Some(channel);
+            let started = Instant::now();
+            let op = if write {
+                json!({"op":"apply_batch","table":"items","actions":[]})
+            } else {
+                json!({"op":"tables"})
+            };
+            assert!(worker.request(op).unwrap_err().contains("deadline"));
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(worker.child.lock().unwrap().try_wait().unwrap().is_some());
+            let mut frame = [0; 8];
+            if write {
+                assert!(observer.read_exact(&mut frame).is_err());
+            } else {
+                observer.read_exact(&mut frame).unwrap();
+                assert_eq!(u64::from_le_bytes(frame), 1);
+            }
         }
     }
     #[test]

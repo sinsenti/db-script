@@ -14,6 +14,7 @@ use std::{
 };
 
 pub mod completion;
+pub mod pg_cancel;
 pub mod pg_read;
 pub mod remote;
 pub mod render;
