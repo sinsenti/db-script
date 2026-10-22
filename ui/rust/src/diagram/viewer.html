@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-dbcli-schema-viewer'; style-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Database schema · dbcli</title>
+<style>@@STYLE@@</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="brand-icon">◇</span><div><h1>Database schema</h1><p id="summary">Loading metadata…</p></div></div>
+  <div class="actions"><button id="fit">Fit diagram <kbd>F</kbd></button><button id="layout">Auto layout</button><button id="details-toggle" aria-controls="details-panel">Details</button><button id="svg-export">Export SVG</button><button id="mermaid-export">Export Mermaid</button><button id="html-export">Save HTML</button><button id="help-open" aria-label="Help">?</button></div>
+</header>
+<main>
+  <aside class="navigation" aria-label="Tables">
+    <label for="search">FIND A TABLE OR COLUMN <kbd>/</kbd></label>
+    <input id="search" type="search" placeholder="Search your schema…" autocomplete="off">
+    <div class="controls"><label for="schema">Schema</label><select id="schema"><option value="">All schemas</option></select><label for="mode">Show</label><select id="mode"><option value="all">Full schema</option><option value="neighbours">Selected table + neighbours</option></select><label class="check"><input id="keys-only" type="checkbox">Keys only</label></div>
+    <div id="table-list" class="table-list"></div>
+    <div class="nav-footer"><span class="dot"></span>Local snapshot · schema only<br><small>No database connection in this viewer</small></div>
+  </aside>
+  <section id="canvas" aria-label="Interactive schema diagram">
+    <svg id="graph" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Tables and declared foreign key relationships">
+      <style id="svg-style">
+        .cluster{fill:#101c2b;stroke:#28384e;stroke-width:1;stroke-dasharray:5 5}.cluster-label{fill:#92a7c2;font:600 14px system-ui,sans-serif}
+        .table .card{fill:#152235;stroke:#354962;stroke-width:1.3}.table .heading{fill:#20344b}.table .name{fill:#f0f6ff;font:600 14px system-ui,sans-serif}.table .kind{fill:#9fb2c9;font:11px system-ui,sans-serif}
+        .table .column-name{fill:#d7e3f3;font:12px ui-monospace,monospace}.table .column-type{fill:#8da6c4;font:11px ui-monospace,monospace}.table .key{fill:#7dd3c7;font:600 10px ui-monospace,monospace}.table .nullable{fill:#d7b47b;font:10px ui-monospace,monospace}.table .row-line{stroke:#26374c;stroke-width:1}
+        .table{cursor:grab;outline:none}.table:focus .card,.table.selected .card{stroke:#7dd3c7;stroke-width:2.5}.table.neighbour .card{stroke:#7095be}.table.dim{opacity:.28}.table.match .heading{fill:#344d64}
+        .edge path{fill:none;stroke:#718aaa;stroke-width:1.6}.edge{cursor:pointer}.edge.selected path,.edge:hover path,.edge:focus path{stroke:#f4bf75;stroke-width:2.8}.edge.dim{opacity:.16}.edge .cardinality{fill:#c6d7eb;font:600 10px ui-monospace,monospace;paint-order:stroke;stroke:#0b1421;stroke-width:4px;stroke-linejoin:round}.edge .edge-label{fill:#a5b9d1;font:10px ui-monospace,monospace;paint-order:stroke;stroke:#0b1421;stroke-width:4px}.edge .arrow{fill:#8ba6c6}.edge.selected .arrow,.edge:hover .arrow{fill:#f4bf75}
+      </style>
+      <g id="clusters"></g><g id="edges"></g><g id="tables"></g>
+    </svg>
+    <div id="empty" hidden>No tables in this view.</div>
+    <div class="canvas-footer"><span id="view-summary"></span><span>Drag tables to arrange · drag background to pan · scroll to zoom</span></div>
+    <div class="zoom"><button id="zoom-out" aria-label="Zoom out">−</button><output id="zoom-label">100%</output><button id="zoom-in" aria-label="Zoom in">+</button></div>
+  </section>
+  <aside id="details-panel" class="details" aria-label="Selection details"><button id="details-close" aria-label="Close details">Close</button><div id="details"></div></aside>
+</main>
+<div id="notice" role="status" aria-live="polite"></div>
+<dialog id="help"><h2>Explore your database</h2><p>Click a table to highlight its incoming and outgoing foreign keys. Click a connection for exact column mappings and constraint actions.</p><ul><li>Use <b>Selected table + neighbours</b> to isolate relationships.</li><li>Drag tables to arrange them; drag the background to pan.</li><li>Scroll or use +/− to zoom. <b>F</b> fits the whole visible diagram.</li><li><b>/</b> searches tables and columns. Arrow keys pan the canvas.</li><li>SVG and Mermaid exports include the current scope and column visibility. SVG preserves your arrangement.</li><li><b>Save HTML</b> keeps the complete offline schema snapshot after you exit dbcli.</li></ul><p>Lines represent declared foreign keys, directed from child to parent. Cardinalities describe the declared keys and nullability; they do not prove existing data is valid. Relationships in application code or JSON values are not inferred.</p><button id="help-close">Close</button></dialog>
+<script type="application/json" id="schema-data">@@DATA@@</script>
+<script nonce="dbcli-schema-viewer">@@SCRIPT@@</script>
+</body>
+</html>

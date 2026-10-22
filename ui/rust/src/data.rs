@@ -74,6 +74,7 @@ pub enum Job {
     Init,
     Load(Spec),
     Inspect(String),
+    Diagram(String),
     Fetch(Spec, String),
     Apply(String, Vec<Value>),
 }
@@ -82,6 +83,7 @@ pub enum Reply {
     Init(Vec<String>),
     Loaded(Bundle),
     Inspected(Page),
+    Diagram(crate::diagram::Diagram, String),
     Fetched(Page, Meta, String),
     Applied(Value),
     Error(String),
@@ -187,6 +189,9 @@ impl Async {
                             })
                         }
                         Job::Inspect(table) => Reply::Inspected(inspect(worker, &config, &table)?),
+                        Job::Diagram(selected) => {
+                            Reply::Diagram(crate::diagram::discover(worker, &config)?, selected)
+                        }
                         Job::Fetch(mut spec, purpose) => {
                             spec.offset = 0;
                             spec.limit = 100000;

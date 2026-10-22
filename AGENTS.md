@@ -175,6 +175,23 @@ Rust sessions start focused on the table sidebar. Tab/Shift+Tab toggles only
 sidebar/rows; numbered view shortcuts remain available from the row pane.
 Its `?` guide has one shortcut/group per row; schema/inspector tables keep headers
 visible while scrolling entries and wrap values within aligned cells.
+Rust `D` (or Ctrl+P → diagram) collects read-only schema metadata through the
+existing generation/cancellation gate and opens a private offline HTML viewer.
+`ui/rust/src/diagram.rs` owns discovery/private files/opener; its diagram/ assets
+own SVG rendering, layout, navigation and HTML/SVG/Mermaid downloads. PostgreSQL
+uses one consistent catalog statement for accessible objects across user schemas;
+SQLite covers main via short-lived metadata reads. Never read application rows,
+embed connection information, load a CDN or interpolate schema names into markup.
+Unusual identifiers stay data; internal IDs drive DOM/Mermaid. Declared composite
+FK order, uniqueness/nullability cardinalities and unavailable targets must survive
+collection. Caps: 1,000 tables/views, 20,000 columns and 10,000 FKs. Files are
+0700/0600 under the non-hidden ~/dbcli-diagrams/schema-* directory (Snap browsers
+cannot read host /tmp). Reject symlink/public output roots. Complete snapshots
+persist across subsequent diagrams and application exit so delayed browser opens
+and reloads work; users remove obsolete snapshots. Save HTML makes a portable
+copy. Preserve write gates and reject stale results before opening. The opt-in
+ui/rust/tests/diagram_acceptance.py exercises actual TUI/file/browser lifetime,
+exports, offline behavior and h navigation using disposable fixtures.
 Built-in Rust text prompts support Ctrl+W to delete the preceding word, including
 whitespace immediately before the cursor, using Unicode character positions.
 Grid `/` has cursor-local column/predicate/cached-scalar suggestions, selected
@@ -196,7 +213,7 @@ original storage for untouched fields and keep the full immutable snapshot/PK.
 Use `dbcli/ui.py` as the source of truth for keybindings, not older planning notes.
 
 - Navigation: `j/k`, `H/L` column focus, `Enter/l` row detail, `gg/G`, `Ctrl+D/U`,
-  and `h/q` back. `/` filters; `:` accepts SQL, filter expressions or row numbers;
+  and `q` back. `h` is unassigned in both Rust interfaces and Python. `/` filters; `:` accepts SQL, filter expressions or row numbers;
   `Ctrl+G` edits filter/prompt text in the external editor.
 - `o/O` sorts, `v` toggles column visibility, Space marks rows, and `f` follows
   foreign keys. `a`, `e`, `E`, `dd` insert/edit/bulk-edit/delete in writable sessions.

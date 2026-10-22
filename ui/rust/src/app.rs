@@ -99,6 +99,7 @@ pub struct App {
     pub filter_suggestions: Option<crate::filter_completion::Suggestions>,
     pub json_fields: Vec<crate::json_completion::Field>,
     pub bulk_external: Option<(Vec<Value>, Value)>,
+    diagram_viewer: Option<crate::diagram::Viewer>,
     pub width: u16,
     pub height: u16,
     history: Vec<Spec>,
@@ -141,6 +142,7 @@ impl App {
             filter_suggestions: None,
             json_fields: vec![],
             bulk_external: None,
+            diagram_viewer: None,
             width: 120,
             height: 35,
             history: vec![],
@@ -199,6 +201,17 @@ impl App {
             self.busy = false;
             self.status = "Read cancelled; browser remains open. Ctrl+P → refresh to retry".into();
         }
+    }
+    fn diagram(&mut self, db: &Async) {
+        let selected = if self.focus == Focus::Sidebar {
+            self.table_names()
+                .get(self.table_cursor)
+                .cloned()
+                .unwrap_or_else(|| self.spec.table.clone())
+        } else {
+            self.spec.table.clone()
+        };
+        self.submit(Job::Diagram(selected), db);
     }
     fn refresh(&mut self, db: &Async) {
         if !self.tables_loaded {
@@ -270,6 +283,27 @@ impl App {
                 self.view = View::Inspect;
                 self.scroll = 0;
                 self.status = "Index / constraint / trigger inspector".into();
+            }
+            Reply::Diagram(model, selected) => {
+                match crate::diagram::Viewer::create(&model, &selected) {
+                    Ok(viewer) => {
+                        let opening = viewer.open();
+                        let path = viewer.path.display().to_string();
+                        self.status = if opening {
+                            "Opening local schema diagram…"
+                        } else {
+                            "Open the diagram file in your browser"
+                        }
+                        .into();
+                        self.modal = Some(Modal::Text {
+                        title: "Database schema diagram · q/Esc back".into(),
+                        text: format!("{} tables/views · {} foreign keys\n\n{}\n\nLocal file:\n{}\n\nIf no browser appears, open this file in your web browser.\n\nUse table search, schema selection, Keys only, and Selected table + neighbours to explore.\nClick a connection for exact column mappings and constraint actions.\n\nThe viewer reads no rows and has no database connection.\nSnapshots stay in ~/dbcli-diagrams after browser exit or another D request, so reloads keep working.\nUse Save HTML for a portable copy. Delete old snapshot folders when you no longer need them.",model.tables.len(),model.relationships.len(),if opening {"Requested your default browser."} else {"Desktop opener is unavailable."},path),
+                            scroll: 0, detail: false,
+                        });
+                        self.diagram_viewer = Some(viewer);
+                    }
+                    Err(error) => self.status = error,
+                }
             }
             Reply::Fetched(p, m, purpose) => {
                 if purpose == "bulk" {
@@ -616,7 +650,7 @@ impl App {
     }
     pub fn key(&mut self, key: KeyEvent, db: &Async) {
         let ctrl = key.modifiers.contains(M::CONTROL);
-        if self.write_pending && matches!(key.code, K::Char('q') | K::Char('h') | K::Esc) {
+        if self.write_pending && matches!(key.code, K::Char('q') | K::Esc) {
             self.status="Transaction pending: wait for its outcome before leaving. Ctrl+C forces exit; outcome may be unknown.".into();
             return;
         }
@@ -636,7 +670,7 @@ impl App {
             self.modal_key(key, db);
             return;
         }
-        if key.code == K::Char('q') || key.code == K::Char('h') || key.code == K::Esc {
+        if key.code == K::Char('q') || key.code == K::Esc {
             self.back(db);
             return;
         }
@@ -695,6 +729,10 @@ impl App {
                         "Read pending: Esc cancels; / filter or : SQL supersedes it".into()
                 }
             }
+            return;
+        }
+        if key.code == K::Char('D') {
+            self.diagram(db);
             return;
         }
         if self.focus == Focus::Sidebar {
@@ -789,7 +827,7 @@ impl App {
             K::Enter | K::Char('l') => {
                 if let Some(row) = self.current() {
                     self.modal = Some(Modal::Text {
-                        title: "Row detail · e edit / dd delete / f follow / h back".into(),
+                        title: "Row detail · e edit / dd delete / f follow / q or Esc back".into(),
                         text: serde_json::to_string_pretty(&editable(&row)).unwrap(),
                         scroll: 0,
                         detail: true,
@@ -1014,7 +1052,7 @@ impl App {
                 let last = count.saturating_sub(visible);
                 let step = visible.saturating_sub(1).max(1);
                 match key.code {
-                    K::Char('q') | K::Char('h') => return,
+                    K::Char('q') => return,
                     K::Char('j') | K::Down => *scroll = scroll.saturating_add(1).min(last),
                     K::Char('k') | K::Up => *scroll = scroll.saturating_sub(1),
                     K::Char('d') if ctrl => *scroll = scroll.saturating_add(step).min(last),
@@ -1025,7 +1063,7 @@ impl App {
                 }
             }
             Modal::Text { scroll, detail, .. } => match key.code {
-                K::Char('q') | K::Char('h') => return,
+                K::Char('q') => return,
                 K::Char('j') | K::Down => *scroll = scroll.saturating_add(1),
                 K::Char('k') | K::Up => *scroll = scroll.saturating_sub(1),
                 K::Char('d') if ctrl => *scroll = scroll.saturating_add(12),
@@ -1055,7 +1093,7 @@ impl App {
                 kind,
                 ..
             } => match key.code {
-                K::Char('q') | K::Char('h') => return,
+                K::Char('q') => return,
                 K::Char('j') | K::Down => {
                     *selected = (*selected + 1).min(items.len().saturating_sub(1))
                 }
@@ -1316,7 +1354,7 @@ impl App {
                         action = matching[0].to_string();
                     }
                 }
-                match action.as_str(){"help"=>self.modal=Some(Modal::Help{scroll:0}),"data"=>self.view=View::Data,"sql"=>self.input(Edit::Sql,self.draft.clone()),"schema"=>self.view=View::Schema,"inspect"=>self.submit(Job::Inspect(self.spec.table.clone()),db),"filter"=>self.input(Edit::Filter,self.spec.filter.clone()),"insert"=>self.insert(),"edit"=>self.edit(),"bulk"=>self.bulk(db),"delete"=>self.delete(),"export"=>self.export("json".into(),db),"tables"=>self.focus=Focus::Sidebar,"refresh"=>self.refresh(db),"quit"=>self.quit=true,_=>return Err("Commands: data sql schema inspect filter insert edit bulk delete export tables refresh quit".into())}
+                match action.as_str(){"help"=>self.modal=Some(Modal::Help{scroll:0}),"data"=>self.view=View::Data,"sql"=>self.input(Edit::Sql,self.draft.clone()),"schema"=>self.view=View::Schema,"inspect"=>self.submit(Job::Inspect(self.spec.table.clone()),db),"diagram"=>self.diagram(db),"filter"=>self.input(Edit::Filter,self.spec.filter.clone()),"insert"=>self.insert(),"edit"=>self.edit(),"bulk"=>self.bulk(db),"delete"=>self.delete(),"export"=>self.export("json".into(),db),"tables"=>self.focus=Focus::Sidebar,"refresh"=>self.refresh(db),"quit"=>self.quit=true,_=>return Err("Commands: data sql schema inspect diagram filter insert edit bulk delete export tables refresh quit".into())}
             }
         }
         Ok(())
@@ -1369,9 +1407,9 @@ pub fn fuzzy(needle: &str, haystack: &str) -> bool {
     }
     next.is_none()
 }
-pub const COMMANDS: [&str; 14] = [
+pub const COMMANDS: [&str; 15] = [
     "data", "sql", "schema", "inspect", "filter", "insert", "edit", "bulk", "delete", "export",
-    "tables", "refresh", "quit", "help",
+    "tables", "refresh", "quit", "help", "diagram",
 ];
 
 // One shortcut (or related key group) per row; tabs separate keys and descriptions.
@@ -1383,7 +1421,7 @@ Ctrl+D/U\tPage down / up
 Enter/l\tOpen row details or choose an item
 Tab/Shift+Tab\tSwitch between the table list and table rows
 1/2/3/4\tShow Data / SQL / Schema / Inspect
-h/q\tGo back or quit
+q/Esc\tGo back or quit
 Esc\tClose a modal, or cancel a pending read
 Ctrl+C\tForce quit; a write outcome may be unknown
 
@@ -1403,6 +1441,7 @@ Space\tMark or unmark a complete row
 f\tChoose a foreign-key relation to follow
 S/3\tShow the full table schema
 I/4\tInspect indexes, constraints and triggers
+D\tOpen a full schema / foreign-key diagram in your browser
 
 TEXT EDITING
 Ctrl+W\tDelete the preceding word and whitespace
@@ -1447,6 +1486,50 @@ Raw SQL screens are read only; --read-only disables all mutations.
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn h_does_not_go_back_or_close_modals() {
+        let db = Async::disconnected();
+        let mut app = App::new(Config::default());
+        app.busy = false;
+        for focus in [Focus::Sidebar, Focus::Grid] {
+            app.focus = focus;
+            app.key(KeyEvent::new(K::Char('h'), M::NONE), &db);
+            assert!(!app.quit);
+            assert_eq!(app.focus, focus);
+        }
+        for modal in [
+            Modal::Help { scroll: 0 },
+            Modal::Text {
+                title: "Row detail".into(),
+                text: "value".into(),
+                scroll: 0,
+                detail: true,
+            },
+            Modal::Choices {
+                title: "Choices".into(),
+                items: vec!["one".into()],
+                selected: 0,
+                kind: "export".into(),
+            },
+            Modal::Preview {
+                actions: vec![],
+                scroll: 0,
+                confirmation: String::new(),
+            },
+            Modal::BulkConfirm {
+                actions: vec![],
+                confirmation: String::new(),
+            },
+        ] {
+            app.modal = Some(modal);
+            app.key(KeyEvent::new(K::Char('h'), M::NONE), &db);
+            assert!(app.modal.is_some(), "h closed a modal");
+            assert!(!app.quit);
+        }
+        app.input(Edit::Filter, String::new());
+        app.key(KeyEvent::new(K::Char('h'), M::NONE), &db);
+        assert!(matches!(app.modal,Some(Modal::Input { ref text,.. }) if text=="h"));
+    }
     #[test]
     fn json_filter_enter_browses_fields_without_submitting() {
         let db = Async::disconnected();

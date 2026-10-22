@@ -206,9 +206,7 @@ fn pager(guard: &mut TerminalGuard, text: &str) -> io::Result<()> {
         ))?;
         let k = read_key()?;
         match k.code {
-            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Char('b') | KeyCode::Esc => {
-                return Ok(())
-            }
+            KeyCode::Char('q') | KeyCode::Char('b') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('j') => offset = (offset + 1).min(lines.len().saturating_sub(1)),
             KeyCode::Char('k') => offset = offset.saturating_sub(1),
             KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -449,9 +447,9 @@ fn detail_screen(
     out.push(line);
     out.push(
         if read_only {
-            "j/k scroll | gg/G top/bottom | h/q return"
+            "j/k scroll | gg/G top/bottom | q/Esc return"
         } else {
-            "j/k scroll | e edit | dd delete | gg/G top/bottom | h/q return"
+            "j/k scroll | e edit | dd delete | gg/G top/bottom | q/Esc return"
         }
         .into(),
     );
@@ -538,7 +536,7 @@ fn pick_foreign_key(
             KeyCode::Char('j') | KeyCode::Down => cursor = (cursor + 1).min(candidates.len() - 1),
             KeyCode::Char('k') | KeyCode::Up => cursor = cursor.saturating_sub(1),
             KeyCode::Enter | KeyCode::Char('l') => return Ok(Some(cursor)),
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => return Ok(None),
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
             _ => {}
         }
     }
@@ -677,9 +675,7 @@ fn browse_with_filter(
         let _ = draw(&screen);
         let key = read_key().map_err(|e| DbError::adapter(e.to_string()))?;
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Char('b') | KeyCode::Esc => {
-                return Ok(())
-            }
+            KeyCode::Char('q') | KeyCode::Char('b') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('j') | KeyCode::Down => {
                 if cursor + 1 < current.rows.len() {
                     cursor += 1
@@ -913,11 +909,7 @@ fn browse_with_filter(
                         let k = read_key().map_err(|e| DbError::adapter(e.to_string()))?;
                         if matches!(
                             k.code,
-                            KeyCode::Esc
-                                | KeyCode::Char('q')
-                                | KeyCode::Char('h')
-                                | KeyCode::Char('b')
-                                | KeyCode::Enter
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b') | KeyCode::Enter
                         ) {
                             break;
                         }

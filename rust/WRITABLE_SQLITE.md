@@ -14,7 +14,7 @@ No SQLite header/linker bootstrap is needed. With no database argument, the brow
 
 ## Interaction
 
-- `j/k`, `H/L`, Enter/l row detail, `gg/G`, Ctrl+D/U, `:` row number, `h/q/b` back.
+- `j/k`, `H/L`, Enter/l row detail, `gg/G`, Ctrl+D/U, `:` row number, `q/b/Esc` back. `h` is unassigned.
 - `/` filters; `:` accepts SELECT/WITH/EXPLAIN or predicates. Ctrl+G edits current filter or active prompt text in `$EDITOR`. Tab cycles contextual columns, tables, keywords, scalar values, JSON paths/values and FK JOIN ON suggestions; matching is prefix or fuzzy. Prompts retain editable initial text; Ctrl+U clears it.
 - `o/O` toggles ascending/descending sort on the focused column. `v` chooses columns to hide/restore. Space marks complete rows by primary-key identity; marks remain stable across paging and sort changes.
 - `a` accepts one JSON object or an array of objects and inserts atomically. `e` edits a row, including from row detail. `dd` requires confirmation; marked rows are deleted together in one atomic transaction after a complete scrollable identity preview. Original complete composite primary keys identify writes even when keys are edited.

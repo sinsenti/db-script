@@ -64,7 +64,7 @@ to scroll entries, Ctrl+D/U to page, and g/G to jump to the first/last entry.
 | j/k, arrows | Row, sidebar, chooser or inspector navigation |
 | H/L, left/right | Column focus with horizontal scrolling |
 | Enter/l | Row detail; Enter chooses sidebar/format/FK item |
-| h/q | Back/quit |
+| q | Back/quit |
 | Esc | Close modal; otherwise cancel pending read without exiting, or back when idle |
 | gg/G, Ctrl+D/U | First/last row and paging |
 | / | Filter data; search tables when sidebar focused |
@@ -76,6 +76,7 @@ to scroll entries, Ctrl+D/U to page, and g/G to jump to the first/last entry.
 | Space | Toggle complete-row marks, stable across pages/sort |
 | f | FK chooser and nested browser, including composite/cross-schema FKs |
 | S/3, I/4 | Full schema and index/constraint/trigger views |
+| D | Open a full database schema diagram in your browser (either pane, when idle) |
 | x, X | JSON export; JSON/CSV/SQL format chooser |
 | a | Insert a row using the built-in JSON prompt |
 | e | Open the current row directly in the external editor, then review changes |
@@ -92,6 +93,84 @@ up/down. Tab completes context columns/tables/keywords, or palette commands.
 Enter inserts a newline in SQL/JSON; Ctrl+R runs/previews. Enter accepts a filter,
 export path, sidebar search or command. A positive row number in the SQL editor
 jumps within the current result. The SQL draft is retained when its modal closes.
+
+`h` is unassigned and never goes back. Use `q` or Esc for navigation.
+
+## Database relationship diagram
+
+Open a SQLite or PostgreSQL database normally and press **D** from the table
+sidebar or row pane. Alternatively, use **Ctrl+P**, type `diagram`, and Enter.
+The application collects fresh schema metadata through its native worker, writes
+a private local HTML file, and requests your default browser with `xdg-open`
+(Linux) or `open` (macOS). The TUI also shows the file path if no browser appears.
+Close that message with q/Esc to keep browsing the database. Esc cancels metadata
+collection; newer reads supersede it, and stale results never launch the viewer.
+Confirmed database writes retain their existing gate.
+
+The self-contained viewer works offline with no web service, JavaScript packages,
+CDN, database credentials or application rows. It offers:
+
+- Tables/views grouped by schema, with column types, nullable markers and PK/FK/UK
+  badges. A UK badge marks membership in a unique key, including composite keys.
+- Directed links between the paired FK columns, including composite, multiple,
+  self-referencing and cross-schema foreign keys. Click a link for the complete
+  mapping, ON UPDATE/DELETE actions, MATCH mode and validation status.
+- Table/column search, schema selection, **Keys only**, and **Selected table +
+  neighbours** (both incoming and outgoing links).
+- Automatic layout, draggable tables, background dragging to pan, scroll/button
+  zoom and **F** to fit. The **Details** button opens the inspector in narrow windows.
+- **Export SVG** and **Export Mermaid** for the current scope/column selection.
+  SVG preserves the arrangement. Mermaid uses stable internal identifiers and
+  retains database names/types in labels/comments, including unusual identifiers.
+- **Save HTML** to keep the complete offline snapshot. Browser downloads use
+  the browser's usual destination and overwrite-confirmation behavior.
+
+Arrows point from child to parent. Parent-per-child cardinality comes from FK
+nullability/MATCH mode; child-per-parent maximum is one when the FK contains an
+entire unconditional primary/unique key, otherwise many. Parent participation
+starts at zero. These describe declared constraints, not verified row contents;
+NOT VALID constraints and SQLite connections with FK checks disabled can contain
+violating rows. Views, JSON fields and application-only relationships are not
+inferred. SQLite FK labels are synthetic because its PRAGMA does not expose
+constraint names. Partial/expression unique indexes are not used for cardinality.
+
+PostgreSQL collects a consistent catalog snapshot for SELECT-accessible objects
+across non-system schemas. Unavailable referenced tables appear as placeholders.
+SQLite covers `main`, including views and generated columns; its metadata reads
+use separate short-lived connections, so regenerate after concurrent schema edits.
+Diagrams are limited to 1,000 tables/views (including placeholders), 20,000 columns
+and 10,000 FK constraints; oversized metadata is rejected rather than silently
+presented as a complete diagram. Existing worker byte/time limits still apply.
+
+Snapshots are stored under **`~/dbcli-diagrams/schema-*/index.html`** with
+0700/0600 directory/file permissions. This non-hidden home path is accessible
+to Snap browsers, whose private `/tmp` cannot see the application's temporary
+files. The output root must be owner-only and cannot be a symlink. Metadata is encoded as
+inert JSON and inserted into the viewer as text, and its content policy blocks
+network connections and external resources. Desktop opener processes have DBCLI
+and PostgreSQL credential variables removed and cannot use the terminal. The
+HTML remains after subsequent diagrams and native-browser exit so delayed desktop
+openers and reloads continue to work. Delete old snapshot folders yourself when
+you no longer need them; Save HTML makes a portable copy. Refresh by pressing D
+again in dbcli. Reopen D to replace an older `/tmp` link that no longer works.
+This feature belongs to the default Rust SQLite/PostgreSQL interface; Python
+reference and MySQL sessions retain their current schema/FK navigation.
+
+Catalog references: [PostgreSQL constraints](https://www.postgresql.org/docs/16/catalog-pg-constraint.html),
+[PostgreSQL indexes](https://www.postgresql.org/docs/16/catalog-pg-index.html),
+[SQLite PRAGMA metadata](https://www.sqlite.org/pragma.html).
+
+The real PTY/browser regression uses disposable SQLite, checks both native `h`
+behaviors, opens snapshots after TUI exit, regenerates/reloads them, checks
+diagram interactions/downloads and rejects unexpected network requests. Install
+the benchmark requirements plus `playwright`; supply a Chromium executable.
+Optional `--firefox` needs Selenium/geckodriver and checks the installed Snap
+Firefox. Optional `--postgres-container NAME` reads that explicit container's
+`public.quotes` schema; it does not create or mutate its data.
+
+```sh
+python3 ui/rust/tests/diagram_acceptance.py --browser /path/to/chrome
+```
 
 ## Filter suggestions
 

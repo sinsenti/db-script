@@ -712,7 +712,7 @@ def toggle_column_visibility(headers, hidden_cols):
             f" {BOLD}Controls:{RESET} {YELLOW}j/k{RESET} Up/Down | "
             f"{YELLOW}SPACE/Enter{RESET} Toggle | "
             f"{YELLOW}a{RESET} Toggle All | "
-            f"{YELLOW}h/q/Esc{RESET} Return"
+            f"{YELLOW}q/Esc{RESET} Return"
         )
 
         draw_frame(lines)
@@ -734,7 +734,7 @@ def toggle_column_visibility(headers, hidden_cols):
                 hidden_cols.clear()
             else:
                 hidden_cols.update(headers[1:])
-        elif key in ("h", "q", "b"):
+        elif key in ("q", "b"):
             break
 
 # -------------------------------------------------------------------
@@ -816,7 +816,7 @@ def select_menu_item(title, items, display_key=None, subtext=None, initial_idx=0
             f" {BOLD}Vim Nav:{RESET} {YELLOW}j/k{RESET} Up/Down | "
             f"{YELLOW}gg/G{RESET} Jump | "
             f"{YELLOW}l/Enter{RESET} Select | "
-            f"{YELLOW}h/q{RESET} Back | "
+            f"{YELLOW}q{RESET} Back | "
             f"{YELLOW}/s{RESET} Search | "
             f"{YELLOW}c{RESET} Clear | "
             f"{YELLOW}1-{min(9, len(active_items))}{RESET} Pick"
@@ -858,7 +858,7 @@ def select_menu_item(title, items, display_key=None, subtext=None, initial_idx=0
         elif key.lower() == "c":
             filter_text = None
             cursor_idx = 0
-        elif key in ("h", "q", "b"):
+        elif key in ("q", "b"):
             return None, cursor_idx
 
 # -------------------------------------------------------------------
@@ -1090,7 +1090,7 @@ def browse_row_detail(headers, row, row_num, update_fn=None, delete_fn=None):
             f" {BOLD}Vim Nav:{RESET} {YELLOW}j/k{RESET} Line Up/Down | "
             f"{mutation_help}"
             f"{YELLOW}gg/G{RESET} Top/Bottom | "
-            f"{YELLOW}h/q/Esc/Enter{RESET} Return"
+            f"{YELLOW}q/Esc/Enter{RESET} Return"
         )
 
         draw_frame(frame_lines)
@@ -1141,7 +1141,7 @@ def browse_row_detail(headers, row, row_num, update_fn=None, delete_fn=None):
                             sys.stdout.write("\033[?25l")
                             sys.stdout.flush()
                             return True
-        elif key in ("h", "q", "b", "ENTER"):
+        elif key in ("q", "b", "ENTER"):
             break
 
     return False
@@ -1270,7 +1270,7 @@ def browse_table(
 
         frame_lines.append(
             f" {BOLD}{CYAN}Data Browser: {table_name}{RESET} [{status}] [{col_status}]  "
-            f"{DIM}(Press 'h' to back, '/' for SQL filter search){RESET}"
+            f"{DIM}(Press 'q' to go back, '/' for SQL filter search){RESET}"
         )
 
         table_lines = build_ascii_table_lines(
@@ -1305,7 +1305,7 @@ def browse_table(
             f"{YELLOW}S/I{RESET} Schema/Indexes | "
             f"{YELLOW}:{RESET} SQL/Jump | "
             f"{YELLOW}x/X{RESET} Export | "
-            f"{YELLOW}h/q{RESET} Back"
+            f"{YELLOW}q{RESET} Back"
         )
 
         draw_frame(frame_lines)
@@ -2000,5 +2000,5 @@ def browse_table(
             marked_rows.clear()
             cached_total_count = None
 
-        elif key in ("h", "q", "b"):
+        elif key in ("q", "b"):
             break

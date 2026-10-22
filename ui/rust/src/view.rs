@@ -129,7 +129,7 @@ pub fn draw(f: &mut Frame, a: &App) {
                 }),
             ),
             Line::styled(
-                format!(" {} · Tab tables/rows  / filter  : SQL  a/e/E edit  dd delete  x/X export  ? help  q back ",
+                format!(" {} · Tab tables/rows  D diagram  / filter  : SQL  a/e/E edit  dd delete  x/X export  ? help  q back ",
                     if a.focus == Focus::Sidebar { "Tables focused" } else { "Rows focused" }),
                 Style::default().fg(MUTED),
             ),

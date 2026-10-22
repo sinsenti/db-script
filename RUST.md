@@ -82,6 +82,25 @@ and [Ratatui controls](ui/rust/README.md). Bulk editing is bounded to 100,000 ro
 and holds data in memory. PostgreSQL TLS-required endpoints and interactive MySQL
 browsing are unsupported. Raw SQL remains read-only in writable sessions.
 
+## Schema diagram
+
+Press **D** in either pane (or Ctrl+P → `diagram`) to open an offline, interactive
+database diagram in your web browser. It includes schema grouping, columns/types,
+PK/FK/unique keys, column-level foreign-key links, search, table dragging,
+zoom/pan, and a selected-table/neighbours view. Click a relationship for composite
+column mappings, cardinalities and ON UPDATE/DELETE actions. Export the current
+scope as SVG or Mermaid; **Save HTML** preserves the full offline snapshot.
+
+This uses read-only metadata queries for SQLite/PostgreSQL, with no row data,
+connection credentials, web server or online dependency. Esc cancels collection.
+The TUI displays the private file path if automatic desktop opening fails.
+Private snapshots are stored in **`~/dbcli-diagrams/schema-*/index.html`** so Snap
+browsers can read them. They survive later D requests and application exit;
+delete old snapshot folders when no longer needed. Save HTML makes a portable
+copy. No relationships are inferred from JSON or
+application code. See [the UI guide](ui/rust/README.md#database-relationship-diagram)
+for permissions, metadata scope, declared cardinalities and size limits.
+
 ## Filter completion
 
 Grid `/` suggests columns, predicates and short cached values. Use ↑/↓ to select,

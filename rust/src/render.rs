@@ -262,7 +262,7 @@ pub fn render_browser_state(
     lines.extend(table_lines(
         headers, &rows, &widths, cursor, focused, marked, sort, ansi,
     ));
-    let mut help=" Vim Nav: j/k Up/Down | l/Enter Card | H/L Focus | gg/G Jump | a Add | e Edit | E Bulk Edit | dd Del | o/O Sort | v Visibility | SPACE Mark | f FK | S/I Schema/Indexes | : SQL/Jump | x/X Export | h/q Back".to_string();
+    let mut help=" Vim Nav: j/k Up/Down | l/Enter Card | H/L Focus | gg/G Jump | a Add | e Edit | E Bulk Edit | dd Del | o/O Sort | v Visibility | SPACE Mark | f FK | S/I Schema/Indexes | : SQL/Jump | x/X Export | q/Esc Back".to_string();
     if read_only {
         help = help.replace(" | a Add | e Edit | E Bulk Edit | dd Del", "");
     }
